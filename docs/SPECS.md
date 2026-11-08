@@ -26,23 +26,25 @@ of these, it is not M1 work — see guardrail 1 in `CLAUDE.md`.
 | Authentication, users, groups, JWT, Cognito | M2 |
 | Access lists on documents or chunks; permission-filtered retrieval; row-level security | M2 |
 | Permission-leakage eval cases | M2 |
-| S3, SQS, dead-letter queues, async workers, ECS/Lambda | M3 |
-| Terraform/CDK, CI/CD deploys, CloudWatch, X-Ray | M3 |
-| Synthetic company, ground-truth file, generated documents | M4 |
+| Synthetic pharma company, ground-truth file, generated documents | M3 |
+| S3, SQS, dead-letter queues, async workers, ECS/Lambda | M4 |
+| Terraform/CDK, CI/CD deploys, IaC scanning, CloudWatch, X-Ray | M4 |
 | Conflict detection and resolution | M5 |
 | Expert finding (`who_knows`), rule history over time | M5 |
+| MCP server exposing the agent's tools | M5 |
 | Reranking | M5 (ADR-0018) |
 | Prompt-injection eval cases | M5 |
-| Open models, quantization, local serving, vLLM | M6 |
-| MCP connectors, multi-tenancy, web UI, Slack bot, LoRA | M7 |
+| Corrections, verified answers, SME review queue, gap detection | M6 |
+| Open models, served comparisons, quantization study, eval-driven LoRA | M7 |
+| MCP connectors for external sources, multi-tenancy, web UI, Slack bot | M8 |
 
 Three M1 structures are shaped for later milestones, deliberately, to avoid a reshape:
-the `documents.status` enum (M3 async ingestion), the metrics table's deferred rows (M2/M5), and
+the `documents.status` enum (M4 async ingestion), the metrics table's deferred rows (M2/M5), and
 the deferred agent tools (M5). Nothing else anticipates a later milestone.
 
 ## Exit criteria
 
-M1 is done when all five hold:
+M1 is done when all seven hold:
 
 1. The pinned Airflow slice is ingested and indexed, and re-running ingestion changes nothing
    (content-hash idempotency, verified by a second run reporting 0 re-embeds).
@@ -51,6 +53,10 @@ M1 is done when all five hold:
 4. `kb eval` runs the whole suite in one command and writes a results table.
 5. An unanswerable question returns an explicit "I don't know" rather than a fabricated answer,
    and this is covered by at least two eval cases.
+6. Every interaction is written to the query log as a full trace — including abstentions and
+   errors, which are the ones worth reviewing.
+7. CI is green on every pull request: pre-commit (ruff, pyright), gitleaks, pytest, and the eval
+   smoke set.
 
 ## Dataset — Apache Airflow scheduler slice
 
@@ -106,7 +112,7 @@ should make that harder.
 | `document_id` | `uuid` FK → `documents.id` | `ON DELETE CASCADE` |
 | `ordinal` | `int` | Position within the document |
 | `text` | `text` | The chunk as embedded |
-| `embedding` | `vector(1024)` | **Pinned at 1024 — see ADR-0006** |
+| `embedding` | `vector(N)` | N derives from the configured model — see ADR-0006 |
 | `embedding_model` | `text` | Model that produced this vector. Required. |
 | `tsv` | `tsvector` | Generated from `text`, for keyword search |
 | `file_path` | `text` | Code only |
@@ -117,20 +123,22 @@ should make that harder.
 
 Indexes: GIN on `tsv`, HNSW on `embedding`, btree on `document_id`.
 
-Two constraints from ADR-0006, both of which fail silently if ignored:
+Three constraints from ADR-0006, the first two of which fail silently if ignored:
 
-- **1024 dimensions is a schema commitment, not a config value.** `vector(N)` is fixed-width.
-  Swapping to a model that cannot emit 1024 is a migration. 1024 is the default across the whole
-  current Voyage lineup and is reachable by every Qwen3-Embedding size via MRL truncation, which
-  is what keeps ADR-0020 a config change.
 - **`embedding_model` is required, and every vector query filters on it.** Cosine distance
   between vectors from two different models is a meaningless number that no exception will warn
   you about. Mixed-model corpora are only safe because of this filter.
+- **The dimension is validated against the column, not a constant.** `vector(N)` is fixed-width,
+  and N is read from the configured provider's reported dimension when the migration runs. The
+  embedding model is still open (ADR-0022), so no number is hard-coded here — committing to one
+  in advance would constrain that choice instead of following it.
+- **The Voyage ceiling run stores its vectors separately.** Its dimension will differ from the
+  local model's, and a column holds one dimension. See *Quality ceiling* below.
 
 ## Ingestion — synchronous in M1
 
 M1 has no queue (M3, ADR-0015). The CLI walks the corpus in-process, but through the same stage
-boundaries the M3 workers will use, so M3 is a transport change rather than a rewrite:
+boundaries the M4 workers will use, so M4 is a transport change rather than a rewrite:
 
 ```
 discover → parse → chunk → embed → upsert
@@ -196,8 +204,23 @@ the eval harness reports cost per query.
 **`EmbeddingProvider`** — embed a batch of texts; expose `model_name` and `dimension`. Callers
 persist `model_name` onto every chunk.
 
-- M1 implementation: Voyage — `voyage-code-3` for `source_type = code`, `voyage-3` otherwise.
-- `dimension` must be 1024 or ingestion refuses to run, rather than failing at the INSERT.
+- M1 default: a **local** model via Ollama or sentence-transformers. Which model is open
+  (ADR-0022); the choice sets the column dimension, so settle it before the first migration.
+- M1 also ships a **Voyage** implementation, used only for the quality ceiling run below — not on
+  the serving path.
+- Ingestion refuses to start when the provider's `dimension` disagrees with the column it is
+  about to write, rather than failing at the INSERT or truncating silently.
+
+### Quality ceiling
+
+Per ADR-0006, a Voyage reference run over the identical pinned corpus, scored on the identical
+eval suite. This is a measurement, not a serving path, and it exists for attribution: without it,
+a weak `recall@k` has two suspects — the local embedding model and the chunk parameters
+(ADR-0019) — and no way to separate them.
+
+Because its dimension differs from the local model's, the ceiling run materialises vectors in a
+separate table with its own `vector(N)`, keyed to the same documents. Its scores go in the
+results table as a distinct configuration, not as a replacement row.
 
 ## Agent
 
@@ -234,6 +257,53 @@ ordinary content, not a hypothetical.
 
 Keep the stable prefix (system prompt, tool definitions) byte-identical across calls so prompt
 caching works; put the question after it.
+
+## Query logging
+
+The schema and the writes land in M1 so traces exist from the first query. Access controls and
+retention enforcement arrive with auth in M2; M1 ships the record, not the policy.
+
+### `interactions`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `uuid` PK | |
+| `created_at` | `timestamptz` | |
+| `user_id` | `text` | Local/CLI identity in M1; a real subject from M2 |
+| `question` | `text` | |
+| `answer` | `text` | Null when the run errored |
+| `abstained` | `boolean` | Distinguishes "I don't know" from a failure |
+| `retrieved` | `jsonb` | Per retrieved chunk: `document_id`, `chunk_id`, `content_hash`, per-arm rank and fused score |
+| `llm_model`, `embedding_model` | `text` | Both, since either can move a result |
+| `prompt_version` | `text` | Bump on any prompt change, or the trace can't be interpreted later |
+| `effort` | `text` | |
+| `latency_ms` | `int` | |
+| `input_tokens`, `output_tokens` | `int` | |
+| `cost_usd` | `numeric` | Derived from token usage |
+| `error` | `text` | Null on success |
+
+`retrieved` records `content_hash` as the version identity — it answers "which version of this
+document produced that answer", which is the audit question.
+
+### Two rules that are structural, not conventions
+
+- **The log is never a retrieval source.** No adapter reads `interactions`, it has no chunk or
+  embedding columns, and it is not in any search path. Indexing the agent's own answers would let
+  one wrong answer become its own supporting evidence, and that error is self-reinforcing and
+  nearly impossible to trace back. Only reviewed, verified answers enter the knowledge base,
+  which is M6 work.
+- **Writes happen on every path**, including abstention and error. A log that only records
+  successes hides exactly the interactions worth reviewing, and in M6 those are the raw material
+  for gap detection.
+
+### Known gap
+
+`documents` keeps one row per `source_uri` and upserts on content change, so M1 does not retain
+old document *versions* — only the hash of the current one. Logging `content_hash` still
+identifies which version answered, but reconstructing that version's text is not possible yet.
+Version history is needed for M5 (rule history) and M6 (re-flagging verified answers when sources
+change), so it is a schema change those milestones must carry. Noted here rather than discovered
+there.
 
 ## Citation format
 
@@ -296,6 +366,28 @@ checks where a question permits one, and treat correctness as indicative rather 
 `evals/results/`, recording the config, the model, the embedding model, and the dataset manifest
 SHA alongside the scores. Without those four, a row in the table can't be interpreted later.
 
+## CI and engineering practices
+
+Set up before the first application code — cheap on an empty repo, miserable to retrofit.
+
+| Check | Tool | Runs |
+| --- | --- | --- |
+| Lint and format | `ruff` | pre-commit + CI |
+| Types | `pyright` | pre-commit + CI |
+| Secret scanning | `gitleaks` | pre-commit + CI |
+| Tests | `pytest` | CI on every PR |
+| Eval smoke set | `kb eval --smoke` | CI on every PR |
+
+All work goes through pull requests; every diff is reviewed before merge.
+
+**The eval smoke set is deliberately tiny** — 3–5 cases, not the full suite. It calls paid APIs
+on every pull request, so its cost is a standing per-PR charge rather than a one-off. It exists to
+catch a hard regression (retrieval returning nothing, the agent loop breaking, citations
+vanishing), not to score quality. The full suite runs on demand.
+
+Later milestones add: the permission-leakage gate at 0 (M2), IaC scanning (M4), and AI PR review
+against `docs/DECISIONS.md` and `docs/SPECS.md` once there is real code.
+
 ## Commands
 
 The `kb` CLI. None of these exist yet.
@@ -309,6 +401,8 @@ The `kb` CLI. None of these exist yet.
 | `kb search "<query>"` | Raw hybrid retrieval, no agent — for debugging retrieval alone |
 | `kb ask "<question>"` | Full agent loop with citations |
 | `kb eval [--config <name>]` | Run the suite, write the results table |
+| `kb eval --smoke` | The 3–5 case subset CI runs on every PR |
+| `kb log [--last N]` | Read back recent interaction traces |
 
 `kb search` separate from `kb ask` is deliberate: when an answer is wrong, the first question is
 always whether retrieval or the agent failed, and this answers it in one command.
@@ -317,9 +411,10 @@ always whether retrieval or the agent failed, and this answers it in one command
 
 Environment: `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `DATABASE_URL`. Never committed.
 
-Config file keys: LLM model and effort; embedding model per source type; embedding dimension
-(must be 1024); chunk target, overlap and cap; retrieval `top_k`, per-arm candidate count, RRF
-`k`; agent max iterations; dataset manifest path.
+Config file keys: LLM model and effort; embedding provider and model; chunk target, overlap and
+cap; retrieval `top_k`, per-arm candidate count, RRF `k`; agent max iterations; dataset manifest
+path. The embedding dimension is not a config key — it is read from the provider and checked
+against the column (ADR-0006).
 
 A named config is the unit the eval harness compares, so every knob that could move a score
 belongs here rather than in code.
@@ -334,21 +429,25 @@ src/kb/
   retrieval/     hybrid search, RRF
   agent/         loop, tools, prompts
   eval/          runner, metrics, judge, results table
+  log/           interaction trace writer
   db/            schema, migrations, queries
   cli.py
 datasets/airflow-scheduler/manifest.*
 evals/cases/*.yaml
 evals/results/
 docker-compose.yml
+.pre-commit-config.yaml
+.github/workflows/ci.yml
 ```
 
 ## Open questions
 
 | Question | Tracked as |
 | --- | --- |
+| Which local embedding model, and therefore the vector dimension | ADR-0022 |
 | Chunk size, overlap, fallback behaviour | ADR-0019 |
 | Which model judges answer correctness | ADR-0021 |
-| Whether `voyage-code-3` on code beats one model for everything | ADR-0006 revisit |
+| Whether the Voyage ceiling justifies a hosted serving path | ADR-0006 revisit |
 | Whether RRF beats weighted score fusion | ADR-0005 revisit |
 
 None of these block starting. All of them are answered by measurement rather than discussion,

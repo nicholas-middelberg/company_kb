@@ -73,9 +73,10 @@ for no reason.
    `embedding_model`. Cosine distance between vectors from two different models is a meaningless
    number, and nothing raises an exception to tell you (ADR-0006).
 
-8. **1024 dimensions is a schema commitment.** `vector(N)` is fixed-width — changing embedding
-   dimension is a migration, not a config edit. Check any new embedding model against 1024 before
-   calling it drop-in (ADR-0006).
+8. **The vector dimension follows the configured model.** `vector(N)` is fixed-width, so N is
+   read from the provider at migration time and ingestion refuses to start on a mismatch. Never
+   hard-code a dimension; changing models is a re-embed plus a schema change, not a config edit
+   (ADR-0006).
 
 9. **Decisions go in `docs/DECISIONS.md`.** Code that contradicts an accepted ADR is either a bug
    or needs a superseding ADR. Don't settle an Open ADR silently by writing code.
