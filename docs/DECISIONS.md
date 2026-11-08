@@ -35,7 +35,7 @@ New ADRs append at the end and take the next free number. Numbers are never reus
 | [0019](#adr-0019--chunk-size-and-overlap-per-source-type) | Chunk size and overlap per source type | **Open** | 1 |
 | [0020](#adr-0020--which-open-model-for-the-comparison) | Which open model for the comparison | **Proposed** | 7 |
 | [0021](#adr-0021--which-model-judges-answer-correctness) | Which model judges answer correctness | **Open** | 1 |
-| [0022](#adr-0022--which-local-embedding-model) | Which local embedding model | **Open** | 1 |
+| [0022](#adr-0022--gte-modernbert-base-as-the-local-embedding-model) | gte-modernbert-base as the local embedding model | Accepted | 1 |
 | [0023](#adr-0023--query-logging-is-the-audit-trail-and-never-a-knowledge-source) | Query logging is the audit trail, and never a knowledge source | Accepted | 1 |
 | [0024](#adr-0024--verified-answers-are-a-governed-source-type) | Verified answers are a governed source type | Accepted | 6 |
 | [0025](#adr-0025--gap-detection-uses-observable-signals-never-self-reported-confidence) | Gap detection uses observable signals, never self-reported confidence | Accepted | 6 |
@@ -213,8 +213,9 @@ These are not actually exclusive, because the ceiling only has to be measured on
 
 **Decision.** Both, in defined roles:
 
-- **Operational default: a local embedding model**, via Ollama or sentence-transformers. Which
-  model is open (ADR-0022). This is the serving path, and it is what the privacy story rests on.
+- **Operational default: a local embedding model** — `gte-modernbert-base`, settled in ADR-0022,
+  loaded through sentence-transformers. This is the serving path, and what the privacy story
+  rests on.
 - **Quality ceiling: a Voyage reference run** over the identical pinned corpus (ADR-0008), scored
   on the identical eval suite. A measurement, not a serving path. Its purpose is attribution: it
   makes "retrieval is weak" distinguishable from "the local model is weak", which is the same
@@ -224,9 +225,11 @@ These are not actually exclusive, because the ceiling only has to be measured on
 - **Every chunk stores the `embedding_model` that produced its vector.**
 
 **Dimension derives from the configured model.** `vector(N)` is fixed-width per column, so N is
-read from the configured provider's reported dimension at migration time. It is neither
-hard-coded nor chosen in advance — candidate local models genuinely differ (384, 768, 1024 are
-all common), so fixing N up front would silently constrain ADR-0022 rather than follow it.
+read from the configured provider's reported dimension at migration time, never hard-coded.
+Candidate models genuinely differ — 384, 768 and 1024 are all common — so fixing N up front would
+have constrained ADR-0022 instead of following it. ADR-0022 has since settled on
+`gte-modernbert-base`, which makes N 768 today; that remains a derived value, and replacing the
+model moves the column with it.
 
 **Consequences.** Two of these fail *silently* — no exception, no error, just quietly wrong
 results. They are why this ADR is long:
@@ -618,28 +621,111 @@ sample of judgements by hand, and leaning on exact checks wherever the question 
 **Decide by.** Before the M1 results table is used to compare anything. Until then, treat
 correctness scores as indicative and prefer exact checks.
 
-## ADR-0022 — Which local embedding model
+## ADR-0022 — gte-modernbert-base as the local embedding model
 
-- **Status:** **Open**
+- **Status:** Accepted
 - **Date:** 2026-11-08
 - **Milestone:** 1
 
-**Question.** Which local embedding model serves as the M1 operational default (ADR-0006)?
+**Context.** ADR-0006 puts a local model on the serving path and derives the vector column's
+dimension from it, so this choice gates the first migration. Two constraints narrow the field far
+more than general benchmark standing does.
 
-**Options.** Candidates run via Ollama or sentence-transformers, differing in output dimension
-(384, 768 and 1024 are all common), context length, and quality on code versus prose. Dataset 1
-is roughly half source code (ADR-0008), so performance on code is the discriminating axis rather
-than general MTEB standing.
+First, **one model must cover every source type.** Cross-source answers are the product's
+headline feature, which means a single similarity search has to rank code chunks against
+mailing-list prose — and vectors from two different models cannot be compared at all (consequence
+1 of ADR-0006). A code-specialist model is therefore not an option, however well it scores on
+code alone. The requirement is one model strong on code *and* adequate on prose.
 
-**Constraints.** The choice sets the vector column's dimension (ADR-0006), so it should be made
-before the first migration — changing it later is a re-embed plus a schema change. Context length
-matters against the chunk cap in `docs/SPECS.md`.
+Second, **the chunk cap is small.** 3000 characters is roughly 750–1000 tokens, so a 512-token
+model would truncate, while context length beyond a few thousand tokens buys nothing.
 
-**Decide by.** Before the first `kb db migrate`. The Voyage ceiling run makes the cost of a
-mediocre choice visible rather than invisible, so this is reversible with measurement rather than
-guesswork.
+**Decision.** `Alibaba-NLP/gte-modernbert-base`, loaded through sentence-transformers.
 
----
+| | |
+| --- | --- |
+| Parameters | 149M |
+| Output dimension | **768** — what `chunks.embedding` becomes |
+| Max sequence length | 8192 tokens |
+| License | Apache 2.0 |
+| Matryoshka truncation | No |
+
+Dimension and sequence length are read from `config.json` at the pinned revision below
+(`hidden_size` 768, `max_position_embeddings` 8192), not from the card's prose.
+
+**Why this one.**
+
+- **Code retrieval is the discriminating axis,** since half the corpus is source, and this model
+  is built for it: 79.31 on CoIR across 20 tasks, per its model card (read directly,
+  2026-11-08). A same-protocol comparison in the Granite R2 paper puts it 16.7 points ahead of
+  `granite-embedding-english-r2` on CoIR, 71.5 against 54.8 — that figure is second-hand, from a
+  summary of the paper rather than its table, so treat the 16.7 as indicative; the direction is
+  not in doubt, and a gap that size is not benchmark noise.
+- **It is small, and that compounds.** At 149M parameters a full corpus re-embed is minutes
+  rather than an afternoon. ADR-0019 leaves chunk size and overlap to be settled empirically and
+  every trial is a full re-embed, so a 4x smaller model is the difference between an experiment
+  actually run and one perpetually postponed.
+- 8192 tokens is roughly 8x the chunk cap — no truncation risk now, and headroom if chunks grow.
+- Apache 2.0, and sentence-transformers loads it in-process with no serving daemon to manage.
+
+**The honest uncertainty.** `Qwen3-Embedding-0.6B` is the strongest alternative and is *not* ruled
+out on quality. Its published code figure (75.41 nDCG@10 on MTEB Code v1) and this model's (79.31
+on CoIR) are **different benchmarks**, so the two cannot be ranked from published numbers —
+treating 79.31 > 75.41 as a result would be exactly the cross-benchmark error this log exists to
+prevent. Qwen also offers 1024 native dimensions with MRL truncation and a 32k context.
+
+What decides it is size, not measured quality: 600M parameters against 149M, which is the
+re-embed cost above. So this rests on a concrete operational advantage plus an open quality
+question, and the resolution is a measurement rather than more reading. Qwen3-Embedding-0.6B is
+the designated second candidate to run against the Voyage ceiling once the eval suite exists.
+
+**Consequences.** `chunks.embedding` becomes `vector(768)`. That is a *derived* value, not a new
+pin — the rule in ADR-0006 stands, and if this model is replaced the column follows its
+replacement.
+
+Swapping to Qwen later means 768 -> 1024, a schema change. Per the correction recorded in
+ADR-0006, that costs almost nothing beyond the re-embed any model change already forces, so
+forward compatibility is not a reason to prefer Qwen now.
+
+With no Matryoshka support, 768 cannot be truncated to save storage. At a few hundred documents
+that is irrelevant; it would matter at a corpus two orders of magnitude larger.
+
+**Supply-chain and loading rules.** Loading a model means executing someone else's artefact
+inside the ingestion worker — the process holding database write credentials and the whole corpus
+in memory. That is the worst place in this system to accept arbitrary code execution, so the
+following four rules are binding, not advisory.
+
+1. **Never pass `trust_remote_code=True`.** The flag lets the model repository run arbitrary
+   Python on the loading machine. ModernBERT is implemented inside `transformers` itself, so the
+   official usage has no need of it. Verified 2026-11-08: the repo contains no `.py` files and
+   `config.json` carries no `auto_map`, so there is no remote code for the flag to load even in
+   principle — enabling it would be pure downside.
+
+2. **Load safetensors explicitly** — `use_safetensors=True`. This is not a formality here: the
+   repo ships **both** `model.safetensors` and `pytorch_model.bin`, and the `.bin` is a pickle
+   that can execute code when deserialised. Being explicit makes a missing or renamed safetensors
+   file fail loudly rather than quietly falling back to the pickle.
+
+3. **Pin the exact commit, then go offline.** Load with
+   `revision="e7f32e3c00f91d699e8c43b53106206bcc72bb22"` — head of `main` as of 2026-11-08, repo
+   last modified 2025-07-04 — and set `HF_HUB_OFFLINE=1` so nothing is fetched at runtime. A
+   floating `main` means the weights can change underneath you, which silently invalidates every
+   score in the results table. This is the same failure the pinned corpus in ADR-0008 guards
+   against, from the other direction: both the data and the model have to be fixed before a
+   number means anything.
+
+4. **License confirmed on this model's own card,** not inferred from the sibling reranker:
+   `license: apache-2.0` in the repository's card metadata, checked through the Hub API on
+   2026-11-08. ModernBERT itself is Apache 2.0 as well.
+
+Rule 3 therefore does double duty — a supply-chain control and an eval-reproducibility control.
+An unpinned model is the same class of problem as an unpinned corpus, and a re-pin to a newer
+revision invalidates prior results exactly as a corpus change does.
+
+**Revisit when.** The Voyage ceiling run (ADR-0006) shows a gap large enough to matter, or the
+Qwen comparison wins on this project's own evals rather than on a public leaderboard. Either way
+the trigger is a number out of `kb eval`, which is the point of settling this now rather than
+settling it perfectly.
 
 ## ADR-0023 — Query logging is the audit trail, and never a knowledge source
 

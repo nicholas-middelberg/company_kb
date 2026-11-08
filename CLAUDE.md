@@ -78,18 +78,25 @@ for no reason.
    hard-code a dimension; changing models is a re-embed plus a schema change, not a config edit
    (ADR-0006).
 
-9. **Decisions go in `docs/DECISIONS.md`.** Code that contradicts an accepted ADR is either a bug
-   or needs a superseding ADR. Don't settle an Open ADR silently by writing code.
+9. **Load models pinned, safetensors-only, and with no remote code.** Never
+   `trust_remote_code=True`; always `use_safetensors=True` (the repo also ships a `.bin`
+   pickle); always the pinned `revision`; `HF_HUB_OFFLINE=1` at runtime. The embedding model
+   loads inside the worker holding database credentials and the whole corpus, and unpinned
+   weights silently invalidate every eval score (ADR-0022).
 
-10. **A new dependency needs a line in `docs/DECISIONS.md`.** Dependencies are decisions.
+10. **Decisions go in `docs/DECISIONS.md`.** Code that contradicts an accepted ADR is either a bug
+    or needs a superseding ADR. Don't settle an Open ADR silently by writing code.
 
-11. **Pin the ingestion corpus.** Changing what's indexed invalidates every prior eval score.
+11. **A new dependency needs a line in `docs/DECISIONS.md`.** Dependencies are decisions.
+
+12. **Pin the ingestion corpus.** Changing what's indexed invalidates every prior eval score.
     Scores are only comparable across runs over an identical corpus (ADR-0008).
 
-12. **Never ingest real employer data.** Public and synthetic sources only — not in the index,
-    not in an eval case, not in a screenshot (ADR-0014).
+13. **Never ingest real company or client data.** Public and synthetic sources only — not in the
+    index, not in an eval case, not in a screenshot, not in a one-off local experiment. This is
+    absolute, with no permission-based exception (ADR-0014).
 
-13. **Mind the cost.** Re-embedding is a full corpus pass with real spend, so batch chunking
+14. **Mind the cost.** Re-embedding is a full corpus pass with real spend, so batch chunking
     experiments. No AWS resource before the AWS Budgets alert exists (ADR-0015).
 
 ## Keeping these docs current

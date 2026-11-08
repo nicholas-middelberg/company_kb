@@ -112,7 +112,7 @@ should make that harder.
 | `document_id` | `uuid` FK → `documents.id` | `ON DELETE CASCADE` |
 | `ordinal` | `int` | Position within the document |
 | `text` | `text` | The chunk as embedded |
-| `embedding` | `vector(N)` | N derives from the configured model — see ADR-0006 |
+| `embedding` | `vector(768)` | 768 because the configured model emits it; derived, not pinned — ADR-0006, ADR-0022 |
 | `embedding_model` | `text` | Model that produced this vector. Required. |
 | `tsv` | `tsvector` | Generated from `text`, for keyword search |
 | `file_path` | `text` | Code only |
@@ -129,9 +129,9 @@ Three constraints from ADR-0006, the first two of which fail silently if ignored
   between vectors from two different models is a meaningless number that no exception will warn
   you about. Mixed-model corpora are only safe because of this filter.
 - **The dimension is validated against the column, not a constant.** `vector(N)` is fixed-width,
-  and N is read from the configured provider's reported dimension when the migration runs. The
-  embedding model is still open (ADR-0022), so no number is hard-coded here — committing to one
-  in advance would constrain that choice instead of following it.
+  and N is read from the configured provider's reported dimension when the migration runs. It is
+  768 today because `gte-modernbert-base` emits 768 (ADR-0022) — a derived value, not a new pin.
+  Replacing the model moves the column with it.
 - **The Voyage ceiling run stores its vectors separately.** Its dimension will differ from the
   local model's, and a column holds one dimension. See *Quality ceiling* below.
 
@@ -204,8 +204,14 @@ the eval harness reports cost per query.
 **`EmbeddingProvider`** — embed a batch of texts; expose `model_name` and `dimension`. Callers
 persist `model_name` onto every chunk.
 
-- M1 default: a **local** model via Ollama or sentence-transformers. Which model is open
-  (ADR-0022); the choice sets the column dimension, so settle it before the first migration.
+- M1 default: **`Alibaba-NLP/gte-modernbert-base`** via sentence-transformers, loaded in-process
+  — 149M parameters, 768 dimensions, 8192-token limit, Apache 2.0 (ADR-0022). The 8192 limit is
+  roughly 8x the chunk cap, so no chunk truncates.
+- **Loading is constrained by ADR-0022's supply-chain rules,** which are requirements rather than
+  suggestions: pinned `revision="e7f32e3c00f91d699e8c43b53106206bcc72bb22"`,
+  `use_safetensors=True` (the repo also ships a `.bin` pickle), never `trust_remote_code=True`,
+  and `HF_HUB_OFFLINE=1` at runtime. The pin is an eval-reproducibility control as much as a
+  security one — unpinned weights silently invalidate the results table.
 - M1 also ships a **Voyage** implementation, used only for the quality ceiling run below — not on
   the serving path.
 - Ingestion refuses to start when the provider's `dimension` disagrees with the column it is
@@ -409,11 +415,13 @@ always whether retrieval or the agent failed, and this answers it in one command
 
 ## Configuration
 
-Environment: `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `DATABASE_URL`. Never committed.
+Environment: `ANTHROPIC_API_KEY`, `DATABASE_URL`, and `HF_HUB_OFFLINE=1`. `VOYAGE_API_KEY` is
+needed only for the ceiling run, not for serving. Never committed — `gitleaks` runs in pre-commit
+precisely because a leaked key is not fixable by deleting a line (ADR-0027).
 
-Config file keys: LLM model and effort; embedding provider and model; chunk target, overlap and
-cap; retrieval `top_k`, per-arm candidate count, RRF `k`; agent max iterations; dataset manifest
-path. The embedding dimension is not a config key — it is read from the provider and checked
+Config file keys: LLM model and effort; embedding provider and model (default
+`gte-modernbert-base`); chunk target, overlap and cap; retrieval `top_k`, per-arm candidate
+count, RRF `k`; agent max iterations; dataset manifest path. The embedding dimension is not a config key — it is read from the provider and checked
 against the column (ADR-0006).
 
 A named config is the unit the eval harness compares, so every knob that could move a score
@@ -444,8 +452,8 @@ docker-compose.yml
 
 | Question | Tracked as |
 | --- | --- |
-| Which local embedding model, and therefore the vector dimension | ADR-0022 |
 | Chunk size, overlap, fallback behaviour | ADR-0019 |
+| Whether `Qwen3-Embedding-0.6B` beats the chosen model on this corpus | ADR-0022 revisit |
 | Which model judges answer correctness | ADR-0021 |
 | Whether the Voyage ceiling justifies a hosted serving path | ADR-0006 revisit |
 | Whether RRF beats weighted score fusion | ADR-0005 revisit |
