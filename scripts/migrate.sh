@@ -38,7 +38,10 @@ require_database() {
 }
 
 ensure_ledger() {
+  # client_min_messages: IF NOT EXISTS emits a NOTICE on every run after the
+  # first, which is noise on an otherwise quiet command.
   run_psql -q <<'SQL'
+SET client_min_messages = warning;
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version     text        PRIMARY KEY,
     checksum    text        NOT NULL,

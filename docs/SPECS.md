@@ -404,6 +404,11 @@ against `docs/DECISIONS.md` and `docs/SPECS.md` once there is real code.
 
 ## Commands
 
+Requires a Docker-compatible runtime for the Postgres container. Docker Desktop
+works; this project was verified with Colima (`brew install colima docker
+docker-compose`, then `colima start --cpu 2 --memory 4 --disk 10`), which needs
+no privileged install and carries no licensing question.
+
 The `kb` CLI. None of these exist yet.
 
 | Command | Does |
