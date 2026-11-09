@@ -56,18 +56,36 @@ jobs:
           # Full history: a secret committed and later deleted is still a
           # leaked secret, and is not fixable by removing the line.
           fetch-depth: 0
+      # Cached by version, so the release is fetched once rather than on every
+      # run. GitHub's release CDN proved flaky enough in one evening to break
+      # this job twice; measured from a developer machine, the same URL
+      # succeeded twice and connection-failed once in three attempts.
+      - name: Cache gitleaks
+        id: gitleaks-cache
+        uses: actions/cache@v6
+        with:
+          path: gitleaks
+          key: gitleaks-${{ env.GITLEAKS_VERSION }}-linux-x64
       - name: Install gitleaks
+        if: steps.gitleaks-cache.outputs.cache-hit != 'true'
         shell: bash
         # Downloaded to a file and verified before extracting, rather than
         # streamed into tar. A truncated response otherwise reaches tar as
         # "gzip: unexpected end of file", which reads like a corrupt release
-        # rather than a flaky download -- and it happened.
+        # rather than a flaky download -- and it did.
         run: |
           set -euo pipefail
           url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o gitleaks.tar.gz "$url"
+          curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors --max-time 300 \
+            -o gitleaks.tar.gz "$url"
           gzip -t gitleaks.tar.gz
           tar -xzf gitleaks.tar.gz gitleaks
+          rm -f gitleaks.tar.gz
+      - name: Verify the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gitleaks
           ./gitleaks version
       - name: Scan
         # --config explicitly: without it gitleaks falls back to its
