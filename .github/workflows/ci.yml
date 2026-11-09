@@ -57,10 +57,18 @@ jobs:
           # leaked secret, and is not fixable by removing the line.
           fetch-depth: 0
       - name: Install gitleaks
+        shell: bash
+        # Downloaded to a file and verified before extracting, rather than
+        # streamed into tar. A truncated response otherwise reaches tar as
+        # "gzip: unexpected end of file", which reads like a corrupt release
+        # rather than a flaky download -- and it happened.
         run: |
-          curl -sSfL \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o gitleaks.tar.gz "$url"
+          gzip -t gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
       - name: Scan
         # --config explicitly: without it gitleaks falls back to its
         # built-in rules silently, dropping the Voyage rule.
