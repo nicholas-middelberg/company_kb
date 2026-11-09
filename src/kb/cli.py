@@ -76,6 +76,42 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_search(args: argparse.Namespace) -> int:
+    """Raw retrieval, no agent.
+
+    Separate from `kb ask` deliberately: when an answer is wrong the first
+    question is always whether retrieval or the agent failed, and this answers
+    it in one command.
+    """
+    from kb.providers.local_embeddings import LocalEmbeddingProvider
+    from kb.retrieval.hybrid import search
+
+    config = _resolve_config(args)
+    provider = LocalEmbeddingProvider(config.embedding)
+    with connect(config.database_url) as conn:
+        results = search(
+            conn,
+            args.query,
+            dataset=config.dataset,
+            provider=provider,
+            config=config.retrieval,
+        )
+
+    if not results:
+        print("no results")
+        return 0
+    for position, chunk in enumerate(results, start=1):
+        print(
+            f"{position:>2}. {chunk.citation}  "
+            f"rrf={chunk.rrf_score:.5f}  via {chunk.found_by}"
+            f"  (kw={chunk.keyword_rank}, vec={chunk.vector_rank})"
+        )
+        if args.verbose:
+            excerpt = " ".join(chunk.content.split())[:160]
+            print(f"      {excerpt}")
+    return 0
+
+
 def _cmd_ceiling(args: argparse.Namespace) -> int:
     """Run or estimate the hosted reference run (ADR-0006).
 
@@ -136,6 +172,12 @@ def main(argv: list[str] | None = None) -> int:
     p_status = sub.add_parser("status", help="document counts by status")
     p_status.add_argument("--dataset", help="override the configured dataset")
     p_status.set_defaults(func=_cmd_status)
+
+    p_search = sub.add_parser("search", help="raw hybrid retrieval, no agent")
+    p_search.add_argument("query", help="the search query")
+    p_search.add_argument("--dataset", help="override the configured dataset")
+    p_search.add_argument("-v", "--verbose", action="store_true", help="show a content excerpt")
+    p_search.set_defaults(func=_cmd_search)
 
     p_ceiling = sub.add_parser(
         "ceiling", help="estimate or run the hosted quality-ceiling embedding"

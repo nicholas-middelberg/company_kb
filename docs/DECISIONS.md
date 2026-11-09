@@ -45,6 +45,7 @@ New ADRs append at the end and take the next free number. Numbers are never reus
 | [0029](#adr-0029--forward-only-sql-migrations-with-a-checksum-ledger) | Forward-only SQL migrations with a checksum ledger | Accepted | 1 |
 | [0030](#adr-0030--psycopg-3-as-the-postgres-driver-with-the-pgvector-adapter) | psycopg 3 as the Postgres driver, with the pgvector adapter | Accepted | 1 |
 | [0031](#adr-0031--sentence-transformers-as-the-embedding-runtime-on-cpu-only-torch) | sentence-transformers as the embedding runtime, on CPU-only torch | Accepted | 1 |
+| [0032](#adr-0032--the-vector-arm-cannot-reach-the-hnsw-index) | The vector arm cannot reach the HNSW index | **Open** | 1 |
 
 ## Entry template
 
@@ -1121,3 +1122,50 @@ it. The Hugging Face cache lives outside the repository and is already ignored.
 behind an HTTP service (Ollama, or a text-embeddings-inference container) — at
 which point sentence-transformers and torch leave the dependency tree
 altogether and this ADR is superseded rather than amended.
+
+## ADR-0032 — The vector arm cannot reach the HNSW index
+
+- **Status:** **Open**
+- **Date:** 2026-11-08
+- **Milestone:** 1
+
+**Question.** How does vector search reach the HNSW index, given that the
+dataset and status filters live on `documents` rather than `chunks`?
+
+**The finding.** Measured 2026-11-08 with `EXPLAIN (ANALYZE)` over the real
+schema. The GIN index on `chunks.tsv` is reachable; the HNSW index on
+`chunks.embedding` is **not** — and it stays unreachable even with
+`enable_seqscan = off`, which rules out "the table is small and the planner
+chose otherwise".
+
+The cause is structural rather than a tuning problem: HNSW is an *ordering* index,
+usable only when `ORDER BY ... LIMIT` can be answered by an index scan on
+`chunks`. The vector arm joins `chunks` to `documents` to filter on
+`d.dataset` and `d.status`, so the planner must join first and sort afterwards,
+and the index has nothing to offer.
+
+**Why this is deliberately not fixed yet.** At the current 88 chunks the whole
+hybrid query runs in 0.65 ms, and a sequential scan is genuinely the right plan
+— 4,000 chunks of 768 float32 values is roughly 12 MB, which scans in tens of
+milliseconds. HNSW earns its keep at a hundred thousand chunks, not at four
+thousand. Fixing it now would be building ahead (guardrail 1) against a cost
+that has not appeared.
+
+It is recorded because it is invisible until it is urgent: nothing fails, no
+test goes red, and the index exists and looks used. The first symptom would be
+query latency quietly growing with corpus size.
+
+**Options when it does matter.**
+
+- Denormalise `dataset` (and the indexed-status predicate) onto `chunks`, so
+  the arm filters on one table and the planner can use the index. Cheap as a
+  migration, and the backfill is a single `UPDATE ... FROM documents`.
+- A partial HNSW index per dataset, which keeps the filter exact rather than
+  relying on post-filtering. Does not scale past a handful of datasets.
+- Over-fetch and post-filter, accepting that a filtered HNSW scan can
+  under-return.
+
+**Decide by.** Whichever comes first: query latency becomes visible in the eval
+harness's latency columns, or Milestone 4 puts retrieval on an API request path
+where tens of milliseconds start to matter. Re-run the `EXPLAIN` check then
+rather than assuming — the plan depends on statistics, not only on shape.

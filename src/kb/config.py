@@ -73,6 +73,20 @@ PyTorch internals while claiming to be about the target subsystem.
 
 
 @dataclass(frozen=True)
+class RetrievalConfig:
+    """Hybrid retrieval parameters (ADR-0005).
+
+    `rrf_k` is the reciprocal-rank-fusion constant. Larger values flatten the
+    contribution of top ranks, making the two arms more equal; 60 is the value
+    from the original RRF paper and the usual default.
+    """
+
+    top_k: int = 10
+    candidates_per_arm: int = 20
+    rrf_k: int = 60
+
+
+@dataclass(frozen=True)
 class CeilingConfig:
     """The hosted reference run that establishes the quality ceiling (ADR-0006).
 
@@ -97,6 +111,7 @@ class Config:
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     exclude_dirs: tuple[str, ...] = DEFAULT_EXCLUDE_DIRS
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     ceiling: CeilingConfig = field(default_factory=CeilingConfig)
 
     @classmethod
@@ -113,9 +128,11 @@ class Config:
 
         chunk_raw = _table(raw, "chunk")
         embed_raw = _table(raw, "embedding")
+        retrieval_raw = _table(raw, "retrieval")
         ceiling_raw = _table(raw, "ceiling")
         chunk_defaults = ChunkConfig()
         embed_defaults = EmbeddingConfig()
+        retrieval_defaults = RetrievalConfig()
         ceiling_defaults = CeilingConfig()
 
         return cls(
@@ -129,6 +146,15 @@ class Config:
                 max_chars=_as_int(chunk_raw, "max_chars", chunk_defaults.max_chars),
             ),
             exclude_dirs=_as_str_tuple(raw, "exclude_dirs", DEFAULT_EXCLUDE_DIRS),
+            retrieval=RetrievalConfig(
+                top_k=_as_int(retrieval_raw, "top_k", retrieval_defaults.top_k),
+                candidates_per_arm=_as_int(
+                    retrieval_raw,
+                    "candidates_per_arm",
+                    retrieval_defaults.candidates_per_arm,
+                ),
+                rrf_k=_as_int(retrieval_raw, "rrf_k", retrieval_defaults.rrf_k),
+            ),
             ceiling=CeilingConfig(
                 model=_as_str(ceiling_raw, "model", ceiling_defaults.model),
                 output_dimension=_as_int(
