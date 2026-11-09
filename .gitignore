@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets and local config — never commit these (ADR-0027, guardrail 13)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Model and dataset caches. Embedding weights are large and are pinned by
+# revision in config, not vendored (ADR-0022).
+.cache/
+models/
+.huggingface/
+
+# Local database volumes
+pgdata/
+
+# Ingested corpora. The dataset manifest is committed; the fetched corpus is
+# not — it is reproducible from the pinned manifest (ADR-0008).
+datasets/*/raw/
+datasets/*/cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

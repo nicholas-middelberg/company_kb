@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+
+jobs:
+  lint:
+    name: ruff + pyright + hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: pre-commit
+        # gitleaks is skipped here: its pre-commit entry scans *staged* changes,
+        # of which there are none in CI. The secrets job covers it properly.
+        env:
+          SKIP: gitleaks
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+  secrets:
+    name: gitleaks (full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: a secret committed and later deleted is still a
+          # leaked secret, and is not fixable by removing the line.
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+      - name: Scan
+        # --config explicitly: without it gitleaks falls back to its
+        # built-in rules silently, dropping the Voyage rule.
+        run: ./gitleaks git --config .gitleaks.toml --redact --verbose .
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest

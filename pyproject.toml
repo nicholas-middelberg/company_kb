@@ -1,0 +1,63 @@
+[project]
+name = "company-kb"
+version = "0.1.0"
+description = "Permission-aware RAG agent over code, email, docs and transcripts"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+# Tooling only. Runtime dependencies arrive with the code that needs them;
+# every new dependency needs a line in docs/DECISIONS.md (guardrail 10).
+# ruff and pyright are pinned exactly to match .pre-commit-config.yaml — a
+# version skew between the hook and the local tool makes formatting flip-flop.
+dev = [
+  "ruff==0.17.4",
+  "pyright==1.1.414",
+  "pytest>=8",
+  "pre-commit>=4",
+]
+
+[tool.uv]
+# No build yet: src/kb exists but has nothing to install. Flip to a real build
+# backend once there is a `kb` entry point to expose.
+package = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F",   # pycodestyle, pyflakes
+  "I",             # import sorting
+  "UP",            # pyupgrade
+  "B",             # bugbear
+  "SIM",           # simplification
+  "PTH",           # prefer pathlib
+  "ANN",           # require annotations — pairs with pyright strict
+  "S",             # bandit security rules
+  "T20",           # no stray print()
+  "RUF",
+]
+ignore = [
+  "ANN401",  # Any is acceptable in **kwargs
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN"]  # assert is the point; annotations add noise
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+# Strict from the first commit. ADR-0027: every gate starts green on an empty
+# repository, so none of them needs a grandfathering exception later.
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# src on the path because the project is not installed yet (tool.uv package).
+pythonpath = ["src"]
+addopts = "-ra --strict-markers --strict-config"

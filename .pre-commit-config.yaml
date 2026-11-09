@@ -1,0 +1,46 @@
+# Gates that run before the first application code (ADR-0027).
+# Hook revisions are pinned; `pre-commit autoupdate` bumps them deliberately.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+        # Embedding weights are fetched by pinned revision, never vendored
+        # (ADR-0022). This stops a stray model file reaching git history.
+        args: [--maxkb=512]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      # `ruff-check`/`ruff-format`, not the bare `ruff` id, which is now a
+      # legacy alias for ruff-check.
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      # Scans staged changes only. CI runs a full-history scan separately —
+      # this hook cannot catch a secret already in history.
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # A local hook rather than the pyright-python mirror on purpose: the
+      # mirror runs in its own isolated venv and cannot see this project's
+      # dependencies, so every project import would read as unresolved. Running
+      # through `uv run` type-checks against the real environment, and pins the
+      # pyright version via uv.lock instead of a hook rev.
+      - id: pyright
+        name: pyright
+        entry: uv run pyright
+        language: system
+        types: [python]
+        pass_filenames: false

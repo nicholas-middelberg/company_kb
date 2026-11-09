@@ -1,0 +1,24 @@
+# Extends the default gitleaks ruleset; never replaces it.
+#
+# gitleaks ships dedicated patterns for Anthropic keys but none for Voyage, so
+# a leaked VOYAGE_API_KEY would be caught only by the generic entropy rule.
+# This project holds both keys (docs/SPECS.md), so the gap is worth closing.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "voyage-api-key"
+description = "Voyage AI API key"
+# Dashboard keys carry a pa- prefix. Keys issued through MongoDB Atlas carry
+# al- instead — Voyage is MongoDB-owned and the SDK routes on the prefix — so
+# a pa--only rule would miss half the cases. Length is undocumented, so match
+# permissively and let entropy reject prose.
+regex = '''\b(?:pa|al)-[A-Za-z0-9_-]{32,}\b'''
+keywords = ["pa-", "al-"]
+entropy = 3.5
+
+[rules.allowlist]
+regexTarget = "match"
+regexes = [
+  '''(?i)\b(?:pa|al)-(?:example|placeholder|your|xxx|redacted|dummy|fake)''',
+]
