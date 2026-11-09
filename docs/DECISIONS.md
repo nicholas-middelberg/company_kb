@@ -43,6 +43,8 @@ New ADRs append at the end and take the next free number. Numbers are never reus
 | [0027](#adr-0027--docs-first-with-ci-gates-before-the-first-application-code) | Docs first, with CI gates before the first application code | Accepted | 1 |
 | [0028](#adr-0028--document-version-history) | Document version history | **Open** | 5 |
 | [0029](#adr-0029--forward-only-sql-migrations-with-a-checksum-ledger) | Forward-only SQL migrations with a checksum ledger | Accepted | 1 |
+| [0030](#adr-0030--psycopg-3-as-the-postgres-driver-with-the-pgvector-adapter) | psycopg 3 as the Postgres driver, with the pgvector adapter | Accepted | 1 |
+| [0031](#adr-0031--sentence-transformers-as-the-embedding-runtime-on-cpu-only-torch) | sentence-transformers as the embedding runtime, on CPU-only torch | Accepted | 1 |
 
 ## Entry template
 
@@ -981,3 +983,129 @@ reimplement it, until Milestone 4 needs a direct RDS connection instead of
 what hand-written SQL manages comfortably. Milestone 4 will also need the
 runner to reach RDS directly, which changes the transport but neither the
 ledger nor the files.
+
+## ADR-0030 — psycopg 3 as the Postgres driver, with the pgvector adapter
+
+- **Status:** Accepted
+- **Date:** 2026-11-08
+- **Milestone:** 1
+
+**Context.** Ingestion and retrieval need a Postgres driver, and the `vector`
+column needs to round-trip as a list rather than as hand-formatted SQL text.
+Three drivers are real candidates: psycopg 3, psycopg2, and asyncpg.
+
+**Decision.** Three packages, and one deliberately deferred:
+
+| Package | Role |
+| --- | --- |
+| `psycopg[binary]` (3.3.x) | The driver |
+| `pgvector` (0.5.x) | Registers the `vector` type so embeddings adapt to and from Python |
+| `psycopg_pool` | **Deferred** until something long-lived needs pooling (Milestone 4) |
+
+**Why psycopg 3.** Over psycopg2: psycopg2 is in maintenance, while psycopg 3
+has server-side parameter binding, real type annotations that pyright strict
+can use (ADR-0027), and — the deciding point — one package serving both sync
+and async. Milestone 1's ingestion is a synchronous CLI, and the Milestone 4
+API will likely want async; a driver covering both means that is not a second
+driver decision later.
+
+Over asyncpg: it is faster, but async-only, so the synchronous M1 CLI would be
+written around an event loop for no benefit at a few hundred documents.
+
+**Why the `binary` extra specifically.** It bundles libpq. This machine has no
+libpq at all — Postgres runs in a container and there is no local `psql`
+(verified while setting up ADR-0004's compose file). The pure package would
+therefore require every developer and CI job to install libpq separately, which
+is a setup step that buys nothing in Milestone 1.
+
+**Why the `pgvector` package rather than formatting vectors by hand.** Without
+the adapter, every embedding write becomes manual string construction and every
+read becomes manual parsing. That is precisely where a dimension, ordering or
+float-precision bug hides without raising anything — the same silent class of
+failure ADR-0006 is built around. A registered type adapter removes the
+opportunity.
+
+**Consequences.** The lockfile will carry platform-specific binary wheels,
+which is fine and is what `uv.lock` is for.
+
+One honest caveat: psycopg's maintainers prefer building against the system
+libpq for production rather than shipping the bundled binary. The convenience
+that makes `binary` correct for local development is not automatically correct
+inside a deployed container image, where installing libpq is a Dockerfile line
+rather than a per-developer chore.
+
+**Revisit when.** Milestone 4 containerises the workers — reconsider the pure
+package plus a system libpq in the image at that point — or when the API needs
+connection pooling, which adds `psycopg_pool` and is a separate, smaller
+decision.
+
+## ADR-0031 — sentence-transformers as the embedding runtime, on CPU-only torch
+
+- **Status:** Accepted
+- **Date:** 2026-11-08
+- **Milestone:** 1
+
+**Context.** ADR-0022 chose `gte-modernbert-base` and four binding loading
+rules. Something has to load it. Two in-process options: sentence-transformers,
+or `transformers` directly with hand-written pooling. A third option, Ollama,
+would keep the model out of this process entirely.
+
+**Decision.** `sentence-transformers` (6.x), with torch pinned to the CPU-only
+build through a uv index override.
+
+**Why not raw `transformers`.** The model repository ships
+sentence-transformers pooling and normalisation configuration. Loading through
+`AutoModel` means re-implementing mean pooling and L2 normalisation, and
+getting either subtly wrong changes every vector in the corpus while raising
+nothing. It would surface only as mediocre `recall@k` — and the Voyage ceiling
+run (ADR-0006) would then get the blame for a bug that is ours. Not a trade
+worth making to drop one dependency.
+
+**Why not Ollama.** It would keep torch out of the process, which is genuinely
+attractive. But it needs a separate daemon to install and run, and its model
+distribution does not expose a Hugging Face commit to pin — so ADR-0022's rule
+3, the pinned revision that doubles as an eval-reproducibility control, could
+not be enforced the same way. Verified 2026-11-08 that sentence-transformers
+*can* express all four of those rules:
+
+| ADR-0022 rule | How |
+| --- | --- |
+| Pinned revision | `revision="e7f32e3c…"` constructor argument |
+| safetensors only | `model_kwargs={"use_safetensors": True}`, forwarded to `AutoModel.from_pretrained` |
+| No remote code | `trust_remote_code` defaults to `False` — the rule is "never pass it", not "remember to disable it" |
+| Offline at runtime | `local_files_only=True` alongside `HF_HUB_OFFLINE=1` |
+
+That last column is why this is the right loader: the rules are expressible as
+arguments rather than as discipline.
+
+**Why CPU-only torch.** sentence-transformers pulls torch, and the default PyPI
+Linux wheel is **539 MB** because it bundles the CUDA runtime. CI has no GPU and
+exists to run pyright and a handful of tests, so every job would download half
+a gigabyte of CUDA to do neither. The CPU wheel is a fraction of that. On the
+development machine (macOS arm64) the wheel is 139 MB and already CPU/MPS-only,
+so the override only changes Linux.
+
+GPU serving is Milestone 7's problem and gets its own decision.
+
+**Consequences.** Three heavyweight transitive dependencies enter the tree:
+torch, transformers and tokenizers. That is the price of not hand-rolling
+pooling, and it is worth paying because the hand-rolled version fails silently
+while a large dependency tree merely fails loudly.
+
+CI gets slower on first run; the uv cache absorbs most of it afterwards. If it
+becomes painful the tempting split is to install runtime dependencies only in
+the test job — but that blinds pyright to the imports it most needs to check,
+so prefer fixing the cache.
+
+Expect pyright strict to report missing stubs for torch or transformers. Handle
+those per-module; do not loosen the global mode, because a gate relaxed once
+stays relaxed (ADR-0027).
+
+Disk is a real constraint here, not a theoretical one: the development machine
+has roughly 6 GB free, and torch plus model weights is a visible fraction of
+it. The Hugging Face cache lives outside the repository and is already ignored.
+
+**Revisit when.** Milestone 7 needs GPU serving, or the embedding runtime moves
+behind an HTTP service (Ollama, or a text-embeddings-inference container) — at
+which point sentence-transformers and torch leave the dependency tree
+altogether and this ADR is superseded rather than amended.
