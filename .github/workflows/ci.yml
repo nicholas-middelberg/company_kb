@@ -14,6 +14,8 @@ permissions:
 
 env:
   GITLEAKS_VERSION: 8.30.1
+  # Use the Python already on the runner; do not fetch one.
+  UV_PYTHON_PREFERENCE: only-system
 
 jobs:
   lint:
@@ -21,6 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Python from the runner's tool cache, with uv told to use it below.
+      # Otherwise uv downloads a standalone CPython from a GitHub release on
+      # every run, which 504'd twice in one evening -- a flake worth removing
+      # rather than retrying.
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
@@ -81,6 +90,13 @@ jobs:
       DATABASE_URL: postgresql://kb:kb_local_dev@localhost:5432/company_kb
     steps:
       - uses: actions/checkout@v7
+      # Python from the runner's tool cache, with uv told to use it below.
+      # Otherwise uv downloads a standalone CPython from a GitHub release on
+      # every run, which 504'd twice in one evening -- a flake worth removing
+      # rather than retrying.
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true

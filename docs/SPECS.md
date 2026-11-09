@@ -197,9 +197,27 @@ Hybrid, per ADR-0005.
 
 1. **Keyword.** Postgres `ts_rank` over `tsv`, top 20. (Not textbook BM25; close enough for the
    baseline — named here so the difference isn't later reported as a bug.)
+   The tsquery is built by Postgres from the query text and its lexemes **OR-ed**, because
+   `plainto_tsquery` and `websearch_to_tsquery` both AND every term, which returns nothing at all
+   for a natural-language question. `quote_literal` keeps the construction injection-safe while
+   leaving identifiers like `scheduler_job.py:412` intact as single lexemes.
 2. **Vector.** pgvector cosine distance over `embedding`, top 20, **filtered to the active
    `embedding_model`** (ADR-0006).
-3. **Fuse.** Reciprocal rank fusion, `k = 60`, to a final top-k (default 10).
+3. **Fuse.** Reciprocal rank fusion, `k = 60`, to a final top-k (default 10). Computed in SQL:
+   one round trip, and the database already holds both indexes.
+
+The query is embedded with `purpose="query"`, not `"document"`.
+
+A blank query returns nothing without embedding anything. Vector search has no concept of "no
+match" — it always returns its nearest k — so whitespace would otherwise retrieve arbitrary
+chunks. A meaningful query with no good answer still returns nearest neighbours by design;
+deciding that none support an answer is abstention, which belongs to the agent.
+
+**Known limitation (ADR-0032):** the vector arm cannot reach the HNSW index, because the dataset
+and status filters live on `documents` and HNSW is an ordering index. Verified by `EXPLAIN`, and
+deliberately not fixed: the hybrid query runs in 0.65 ms at current scale, where a sequential scan
+is the right plan. Recorded because the symptom is latency that grows quietly rather than anything
+that fails.
 
 Both arms run against the same `dataset`. Each returned chunk carries its document metadata and
 locators so the agent can cite without a second query.
@@ -462,7 +480,7 @@ The `kb` CLI. None of these exist yet.
 | `kb model-warm` | One-off download of the pinned model, so ingest can stay offline |
 | `kb ceiling [--execute] [--limit N] [--price-per-mtok P]` | Estimate, or run, the hosted ceiling embedding. Estimates by default — a metered command must not spend on its default path |
 | `kb status` | Document counts by status; active embedding model |
-| `kb search "<query>"` | Raw hybrid retrieval, no agent — for debugging retrieval alone |
+| `kb search "<query>" [-v]` | Raw hybrid retrieval, no agent; shows per-arm ranks and the citation |
 | `kb ask "<question>"` | Full agent loop with citations |
 | `kb eval [--config <name>]` | Run the suite, write the results table |
 | `kb eval --smoke` | The 3–5 case subset CI runs on every PR |
@@ -492,7 +510,7 @@ src/kb/
   providers/     LLMProvider, EmbeddingProvider + Anthropic and Voyage implementations
   adapters/      code, email, doc, ticket — parse and chunk
   ingest/        pipeline stages, hashing, upsert
-  retrieval/     hybrid search, RRF
+  retrieval/     hybrid search, RRF, citation formatting
   agent/         loop, tools, prompts
   ceiling/       the hosted reference run (ADR-0006)
   eval/          runner, metrics, judge, results table
