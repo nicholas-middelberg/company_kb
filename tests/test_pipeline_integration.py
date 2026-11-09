@@ -9,88 +9,19 @@ Skipped when no database is reachable, so `pytest` stays useful without
 `docker compose up`.
 """
 
-import hashlib
 import math
-import os
-from collections.abc import Iterator, Sequence
 from pathlib import Path
-from uuid import uuid4
 
 import psycopg
 import pytest
 
+from conftest import DATABASE_URL, DIMENSION, FakeEmbeddingProvider
 from kb.adapters.code import CodeAdapter
 from kb.adapters.doc import DocAdapter
 from kb.config import Config
-from kb.db.connection import connect
 from kb.ingest.pipeline import IngestReport, ingest
-from kb.providers.base import EmbeddingPurpose
 
 pytestmark = pytest.mark.integration
-
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://kb:kb_local_dev@localhost:5432/company_kb"
-)
-DIMENSION = 768
-
-
-class FakeEmbeddingProvider:
-    """Deterministic vectors derived from the text, and a call counter.
-
-    Mirrors the real provider's contract deliberately, including unit-norm
-    output. An earlier version returned raw bytes scaled to [0, 1], giving
-    vectors with norm ~13.9 while the real provider emits ~1.0 -- which would
-    let a test pass while depending on a property production does not have.
-    """
-
-    def __init__(self, dimension: int = DIMENSION) -> None:
-        self._dimension = dimension
-        self.calls = 0
-        self.texts_seen = 0
-        self.purposes: list[str] = []
-
-    @property
-    def model_name(self) -> str:
-        return "fake-test-model"
-
-    @property
-    def dimension(self) -> int:
-        return self._dimension
-
-    def embed(
-        self,
-        texts: Sequence[str],
-        *,
-        purpose: EmbeddingPurpose = "document",
-    ) -> list[list[float]]:
-        self.calls += 1
-        self.texts_seen += len(texts)
-        self.purposes.append(purpose)
-        vectors: list[list[float]] = []
-        for text in texts:
-            seed = hashlib.sha256(text.encode()).digest()
-            raw = [seed[i % len(seed)] / 255.0 for i in range(self._dimension)]
-            norm = math.sqrt(sum(v * v for v in raw)) or 1.0
-            vectors.append([v / norm for v in raw])
-        return vectors
-
-
-@pytest.fixture
-def conn() -> Iterator[psycopg.Connection]:
-    try:
-        with connect(DATABASE_URL) as connection:
-            yield connection
-    except psycopg.OperationalError as error:
-        pytest.skip(f"no database reachable: {error}")
-
-
-@pytest.fixture
-def dataset(conn: psycopg.Connection) -> Iterator[str]:
-    """A unique dataset per test, torn down afterwards."""
-    name = f"test-{uuid4().hex[:12]}"
-    yield name
-    conn.execute("DELETE FROM documents WHERE dataset = %s", (name,))
-    conn.commit()
 
 
 @pytest.fixture

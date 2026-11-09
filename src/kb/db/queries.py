@@ -158,3 +158,80 @@ def embedding_models(conn: psycopg.Connection, dataset: str) -> list[str]:
         (dataset,),
     ).fetchall()
     return sorted(str(row[0]) for row in rows)
+
+
+def chunks_awaiting_ceiling(
+    conn: psycopg.Connection,
+    dataset: str,
+    embedding_model: str,
+    limit: int | None = None,
+) -> list[tuple[UUID, str]]:
+    """Chunks with no ceiling vector yet for this model.
+
+    The anti-join is what makes the ceiling run resumable. It bills per token,
+    so a run that dies two thirds of the way through must not re-pay for the
+    part that already succeeded.
+    """
+    sql = """
+        SELECT c.id, c.content
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        LEFT JOIN ceiling_vectors cv
+          ON cv.chunk_id = c.id AND cv.embedding_model = %s
+        WHERE d.dataset = %s AND d.status = 'indexed' AND cv.chunk_id IS NULL
+        ORDER BY c.document_id, c.ordinal
+    """
+    params: list[object] = [embedding_model, dataset]
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [(UUID(str(row[0])), str(row[1])) for row in rows]
+
+
+def insert_ceiling_vectors(
+    conn: psycopg.Connection,
+    chunk_ids: Sequence[UUID],
+    embeddings: Sequence[Sequence[float]],
+    embedding_model: str,
+) -> int:
+    """Write one batch of ceiling vectors.
+
+    ON CONFLICT DO NOTHING rather than DO UPDATE: a vector already present was
+    produced by the same model over the same chunk text, so overwriting it
+    would spend tokens to replace a row with its own value.
+    """
+    if len(chunk_ids) != len(embeddings):
+        msg = f"{len(chunk_ids)} chunks but {len(embeddings)} embeddings"
+        raise ValueError(msg)
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO ceiling_vectors (chunk_id, embedding_model, embedding)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (chunk_id, embedding_model) DO NOTHING
+            """,
+            [
+                (chunk_id, embedding_model, list(vector))
+                for chunk_id, vector in zip(chunk_ids, embeddings, strict=True)
+            ],
+        )
+    return len(chunk_ids)
+
+
+def ceiling_coverage(
+    conn: psycopg.Connection, dataset: str, embedding_model: str
+) -> tuple[int, int]:
+    """(chunks with a ceiling vector, total indexed chunks) for this dataset."""
+    row = conn.execute(
+        """
+        SELECT count(cv.chunk_id), count(c.id)
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        LEFT JOIN ceiling_vectors cv
+          ON cv.chunk_id = c.id AND cv.embedding_model = %s
+        WHERE d.dataset = %s AND d.status = 'indexed'
+        """,
+        (embedding_model, dataset),
+    ).fetchone()
+    return (int(row[0]), int(row[1])) if row else (0, 0)

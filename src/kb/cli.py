@@ -76,6 +76,38 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ceiling(args: argparse.Namespace) -> int:
+    """Run or estimate the hosted reference run (ADR-0006).
+
+    Estimating is the default. This command spends money per token, and a
+    metered operation whose default action is to spend is a bad default -- so
+    `--execute` is required to actually call the API.
+    """
+    from kb.ceiling import runner
+    from kb.providers.voyage_embeddings import VoyageEmbeddingProvider
+
+    config = _resolve_config(args)
+    price: float | None = args.price_per_mtok
+    provider = VoyageEmbeddingProvider(config.ceiling)
+
+    with connect(config.database_url) as conn:
+        estimate = runner.plan(conn, config.dataset, provider, config.ceiling)
+        print(f"dataset {config.dataset}  model {provider.model_name}")
+        print(estimate.render(price))
+
+        if not args.execute:
+            print("\n  estimate only. Re-run with --execute to embed.")
+            return 0
+        if estimate.pending_chunks == 0:
+            print("\n  nothing pending.")
+            return 0
+
+        print("\nembedding...")
+        report = runner.run(conn, config.dataset, provider, config.ceiling, limit=args.limit)
+        print(report.render(price))
+    return 0
+
+
 def _cmd_model_warm(_: argparse.Namespace) -> int:
     """Download the pinned model once, so ingestion can stay offline.
 
@@ -104,6 +136,24 @@ def main(argv: list[str] | None = None) -> int:
     p_status = sub.add_parser("status", help="document counts by status")
     p_status.add_argument("--dataset", help="override the configured dataset")
     p_status.set_defaults(func=_cmd_status)
+
+    p_ceiling = sub.add_parser(
+        "ceiling", help="estimate or run the hosted quality-ceiling embedding"
+    )
+    p_ceiling.add_argument("--dataset", help="override the configured dataset")
+    p_ceiling.add_argument(
+        "--execute",
+        action="store_true",
+        help="actually call the API; without it this only estimates",
+    )
+    p_ceiling.add_argument("--limit", type=int, default=None, help="embed at most this many chunks")
+    p_ceiling.add_argument(
+        "--price-per-mtok",
+        type=float,
+        default=None,
+        help="USD per million tokens, for cost reporting (check current pricing)",
+    )
+    p_ceiling.set_defaults(func=_cmd_ceiling)
     sub.add_parser("model-warm", help="download the pinned embedding model once").set_defaults(
         func=_cmd_model_warm
     )

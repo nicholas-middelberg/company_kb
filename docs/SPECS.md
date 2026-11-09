@@ -256,9 +256,26 @@ default so the reported dimension cannot drift from the produced one. Voyage cap
 1000 texts and bills per **token**, so request count is not the cost — the provider accumulates
 `total_tokens` for the run.
 
-**Still to build:** the separate vector table (migration 002) and the comparison runner. The
-provider exists and is tested; the run itself lands with the eval harness, which is what scores
-it.
+`ceiling_vectors` (migration 002) holds them, keyed to **`chunks.id`** rather than to documents
+and deliberately so: the ceiling isolates the embedding model only if chunk boundaries are
+identical on both sides, and re-chunking and re-embedding at once would measure the two together
+and attribute the result to neither. `ON DELETE CASCADE`, because a replaced chunk's ceiling
+vector describes text that no longer exists. The primary key is
+`(chunk_id, embedding_model)`, so two hosted models can be compared without a migration — both
+must emit 1024 to share the table.
+
+The runner (`kb ceiling`) has two properties that follow from billing per token:
+
+- **Resumable.** An anti-join fetches only chunks lacking a vector for this model, and each batch
+  commits, so a run that dies partway through does not re-pay for what succeeded.
+- **Estimable, and estimating is the default.** `--execute` is required to call the API at all. A
+  metered command whose default action is to spend is a bad default.
+
+Batching here spans the whole corpus, unlike ingestion. There is no per-document transaction to
+protect, so the one place batching actually pays is the one place nothing prevents it.
+
+**Still to build:** the comparison itself — scoring both vector sets on the same eval suite —
+which lands with the eval harness.
 
 ## Agent
 
@@ -443,6 +460,7 @@ The `kb` CLI. None of these exist yet.
 | `scripts/migrate.sh [--status]` | Apply pending migrations. `kb db migrate` will wrap this (ADR-0029) |
 | `kb ingest <root> [--dataset X]` | Run the pipeline; report per-status counts and embedding-call count |
 | `kb model-warm` | One-off download of the pinned model, so ingest can stay offline |
+| `kb ceiling [--execute] [--limit N] [--price-per-mtok P]` | Estimate, or run, the hosted ceiling embedding. Estimates by default — a metered command must not spend on its default path |
 | `kb status` | Document counts by status; active embedding model |
 | `kb search "<query>"` | Raw hybrid retrieval, no agent — for debugging retrieval alone |
 | `kb ask "<question>"` | Full agent loop with citations |
@@ -476,6 +494,7 @@ src/kb/
   ingest/        pipeline stages, hashing, upsert
   retrieval/     hybrid search, RRF
   agent/         loop, tools, prompts
+  ceiling/       the hosted reference run (ADR-0006)
   eval/          runner, metrics, judge, results table
   log/           interaction trace writer
   db/            queries
