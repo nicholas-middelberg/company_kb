@@ -43,6 +43,11 @@ for no reason.
 
 ### Database migrations
 
+Numbered, forward-only `.sql` files in `src/kb/db/migrations/`, applied by
+`scripts/migrate.sh` (ADR-0029). No down migrations. **Never edit a migration
+that has been applied** — the runner checksums them and will refuse to proceed;
+write a new one instead.
+
 ### Commit messages
 
 ## Guardrails

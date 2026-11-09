@@ -42,6 +42,7 @@ New ADRs append at the end and take the next free number. Numbers are never reus
 | [0026](#adr-0026--mcp-server-is-core-external-connectors-stay-stretch) | MCP server is core; external connectors stay stretch | Accepted | 5 |
 | [0027](#adr-0027--docs-first-with-ci-gates-before-the-first-application-code) | Docs first, with CI gates before the first application code | Accepted | 1 |
 | [0028](#adr-0028--document-version-history) | Document version history | **Open** | 5 |
+| [0029](#adr-0029--forward-only-sql-migrations-with-a-checksum-ledger) | Forward-only SQL migrations with a checksum ledger | Accepted | 1 |
 
 ## Entry template
 
@@ -933,3 +934,50 @@ historical text will drift.
 
 **Decide by.** Start of Milestone 5. Noted now because M1's upsert is a deliberate simplification
 rather than an oversight, and the milestone that needs history pays for the migration.
+
+## ADR-0029 — Forward-only SQL migrations with a checksum ledger
+
+- **Status:** Accepted
+- **Date:** 2026-11-08
+- **Milestone:** 1
+
+**Context.** The schema needs things an ORM-driven migration tool handles
+awkwardly or hides: a `vector` extension type, an HNSW index with its own
+operator class, a generated `tsvector` column, and from Milestone 2 a
+row-level security policy (ADR-0012). Alembic's real advantage is
+autogenerating diffs from SQLAlchemy models — and there are no models, because
+no ORM has been chosen. It would also be a new dependency (guardrail 10) whose
+main feature this project cannot use.
+
+**Decision.** Numbered, forward-only `.sql` files in `src/kb/db/migrations/`,
+applied in filename order by `scripts/migrate.sh`, recorded in a
+`schema_migrations` ledger holding version, SHA-256 and applied-at.
+
+- **No down migrations.** Rolling back means writing a forward migration.
+- **A migration is never edited once applied.** The runner re-checksums every
+  applied file and refuses to continue on a mismatch.
+
+**Consequences.** No new dependency: the runner is Bash plus the `psql` already
+inside the Postgres container. The SQL stays the source of truth, which is also
+the part worth being able to explain — RLS policies, the HNSW operator class
+and the generated column are all written out rather than generated.
+
+The checksum is the interesting half. The failure it catches is someone editing
+an applied migration, after which the database and the repository disagree
+about history and nothing says so — every fresh checkout builds a different
+schema from the one running. Refusing to proceed turns that into a loud error
+at the only moment it is still cheap to fix.
+
+Skipping down migrations is deliberate rather than lazy. This database can be
+dropped and rebuilt in seconds, so a reverse path would be ceremony that is
+never exercised and therefore cannot be trusted when it matters.
+
+The costs: schema changes are hand-written, with no autogenerate to catch a
+forgotten column. And `kb db migrate` will shell out to this script rather than
+reimplement it, until Milestone 4 needs a direct RDS connection instead of
+`docker compose exec`.
+
+**Revisit when.** An ORM is adopted — itself an ADR — or the schema grows past
+what hand-written SQL manages comfortably. Milestone 4 will also need the
+runner to reach RDS directly, which changes the transport but neither the
+ledger nor the files.

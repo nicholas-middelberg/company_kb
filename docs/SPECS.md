@@ -111,7 +111,7 @@ should make that harder.
 | `id` | `uuid` PK | |
 | `document_id` | `uuid` FK → `documents.id` | `ON DELETE CASCADE` |
 | `ordinal` | `int` | Position within the document |
-| `text` | `text` | The chunk as embedded |
+| `content` | `text` | The chunk as embedded. Named `content`, not `text`: a bare `text` in a Postgres expression collides with typed-literal syntax (`text 'abc'`), which would force quoting it as `"text"` in the generated `tsv` column and every query touching it |
 | `embedding` | `vector(768)` | 768 because the configured model emits it; derived, not pinned — ADR-0006, ADR-0022 |
 | `embedding_model` | `text` | Model that produced this vector. Required. |
 | `tsv` | `tsvector` | Generated from `text`, for keyword search |
@@ -121,7 +121,15 @@ should make that harder.
 | `speaker` | `text` | Transcripts; unused in M1, present for the adapter contract |
 | `message_id` | `text` | Email; identifies the message within a thread |
 
-Indexes: GIN on `tsv`, HNSW on `embedding`, btree on `document_id`.
+Indexes: GIN on `tsv`, HNSW on `embedding` with `vector_cosine_ops`, btree on
+`document_id` and on `embedding_model`. HNSW cannot be composite, so the mandatory
+`embedding_model` filter is a post-filter — free with one active model. Two
+co-resident models would want one partial HNSW index per model instead.
+
+The schema is applied by numbered forward-only migrations in
+`src/kb/db/migrations/`, run by `scripts/migrate.sh` (ADR-0029). An applied
+migration is never edited; the runner checksums them and refuses to proceed on a
+mismatch.
 
 Three constraints from ADR-0006, the first two of which fail silently if ignored:
 
@@ -400,8 +408,8 @@ The `kb` CLI. None of these exist yet.
 
 | Command | Does |
 | --- | --- |
-| `kb db up` / `kb db down` | Start/stop Postgres via docker-compose |
-| `kb db migrate` | Apply schema |
+| `docker compose up -d` / `down` | Start/stop Postgres. `kb db up`/`down` will wrap this |
+| `scripts/migrate.sh [--status]` | Apply pending migrations. `kb db migrate` will wrap this (ADR-0029) |
 | `kb ingest --dataset airflow-scheduler` | Run the pipeline; report per-status counts and embedding-call count |
 | `kb status` | Document counts by status; active embedding model |
 | `kb search "<query>"` | Raw hybrid retrieval, no agent — for debugging retrieval alone |
@@ -438,8 +446,10 @@ src/kb/
   agent/         loop, tools, prompts
   eval/          runner, metrics, judge, results table
   log/           interaction trace writer
-  db/            schema, migrations, queries
+  db/            queries
+  db/migrations/ numbered forward-only .sql (ADR-0029)
   cli.py
+scripts/migrate.sh
 datasets/airflow-scheduler/manifest.*
 evals/cases/*.yaml
 evals/results/

@@ -1,0 +1,27 @@
+# Local Postgres for Milestone 1 (ADR-0004). The same database runs on RDS from
+# Milestone 4, so schema and queries move unchanged.
+services:
+  postgres:
+    # Pinned to a pgvector release, not the floating pg16 tag: an index built by
+    # one pgvector version and queried by another is not a comparison you want
+    # to debug, and unpinned infrastructure invalidates eval scores the same way
+    # unpinned weights do (ADR-0022).
+    image: pgvector/pgvector:0.8.7-pg16
+    container_name: company-kb-postgres
+    environment:
+      POSTGRES_USER: ${KB_PG_USER:-kb}
+      # Local-only development credential. Real credentials live in Secrets
+      # Manager from Milestone 4 and never in this file.
+      POSTGRES_PASSWORD: ${KB_PG_PASSWORD:-kb_local_dev}
+      POSTGRES_DB: ${KB_PG_DATABASE:-company_kb}
+    ports:
+      # Overridable, because 5432 is often already taken by a local Postgres.
+      - "${KB_PG_PORT:-5432}:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KB_PG_USER:-kb} -d ${KB_PG_DATABASE:-company_kb}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
