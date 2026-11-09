@@ -11,6 +11,11 @@ dependencies = [
   "sentence-transformers>=6.2",
 ]
 
+[project.optional-dependencies]
+# ADR-0006: the Voyage ceiling run is a measurement, not the serving path, so a
+# serving install should not carry a client it never calls.
+ceiling = ["voyageai>=0.5"]
+
 [project.scripts]
 kb = "kb.cli:main"
 
@@ -31,6 +36,12 @@ dev = [
   "pyright==1.1.414",
   "pytest>=8",
   "pre-commit>=4",
+  # Also in the `ceiling` extra. Present here so the type-checked and tested
+  # environment is deterministic: without it, pyright's verdict on the Voyage
+  # provider depends on whether a developer happened to pass --extra, and the
+  # pre-commit hook fails for anyone who did not. The extra still governs what
+  # a *serving* install carries, which was the point of making it optional.
+  "voyageai>=0.5",
 ]
 
 [tool.uv]
@@ -87,4 +98,5 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 markers = [
   "integration: needs a reachable Postgres (docker compose up -d)",
+  "model: loads the real embedding model; needs warm weights (kb model-warm)",
 ]

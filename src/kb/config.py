@@ -73,12 +73,31 @@ PyTorch internals while claiming to be about the target subsystem.
 
 
 @dataclass(frozen=True)
+class CeilingConfig:
+    """The hosted reference run that establishes the quality ceiling (ADR-0006).
+
+    Not the serving path. Its vectors are stored separately because its
+    dimension differs from the local model's, and a column holds one dimension.
+
+    `output_dimension` is sent explicitly rather than relying on the model
+    default, so the number this provider reports cannot drift from the number
+    it actually produces.
+    """
+
+    model: str = "voyage-3-large"
+    output_dimension: int = 1024
+    batch_size: int = 128
+    max_retries: int = 3
+
+
+@dataclass(frozen=True)
 class Config:
     dataset: str = "airflow-scheduler"
     database_url: str = DEFAULT_DATABASE_URL
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     exclude_dirs: tuple[str, ...] = DEFAULT_EXCLUDE_DIRS
+    ceiling: CeilingConfig = field(default_factory=CeilingConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
@@ -94,8 +113,10 @@ class Config:
 
         chunk_raw = _table(raw, "chunk")
         embed_raw = _table(raw, "embedding")
+        ceiling_raw = _table(raw, "ceiling")
         chunk_defaults = ChunkConfig()
         embed_defaults = EmbeddingConfig()
+        ceiling_defaults = CeilingConfig()
 
         return cls(
             dataset=_as_str(raw, "dataset", cls.dataset),
@@ -108,6 +129,14 @@ class Config:
                 max_chars=_as_int(chunk_raw, "max_chars", chunk_defaults.max_chars),
             ),
             exclude_dirs=_as_str_tuple(raw, "exclude_dirs", DEFAULT_EXCLUDE_DIRS),
+            ceiling=CeilingConfig(
+                model=_as_str(ceiling_raw, "model", ceiling_defaults.model),
+                output_dimension=_as_int(
+                    ceiling_raw, "output_dimension", ceiling_defaults.output_dimension
+                ),
+                batch_size=_as_int(ceiling_raw, "batch_size", ceiling_defaults.batch_size),
+                max_retries=_as_int(ceiling_raw, "max_retries", ceiling_defaults.max_retries),
+            ),
             embedding=EmbeddingConfig(
                 model=_as_str(embed_raw, "model", embed_defaults.model),
                 revision=_as_str(embed_raw, "revision", embed_defaults.revision),

@@ -222,7 +222,9 @@ These are not actually exclusive, because the ceiling only has to be measured on
 - **Quality ceiling: a Voyage reference run** over the identical pinned corpus (ADR-0008), scored
   on the identical eval suite. A measurement, not a serving path. Its purpose is attribution: it
   makes "retrieval is weak" distinguishable from "the local model is weak", which is the same
-  argument ADR-0003 makes for using a frontier LLM first.
+  argument ADR-0003 makes for using a frontier LLM first. Implemented against the official
+  `voyageai` client, declared as an **optional extra** rather than a dependency, because a
+  serving install should not carry a client it never calls (guardrail 10 satisfied here).
 - Both reached only through the `EmbeddingProvider` interface. The model name is configuration,
   never a literal in ingestion or retrieval code.
 - **Every chunk stores the `embedding_model` that produced its vector.**
@@ -233,6 +235,16 @@ Candidate models genuinely differ — 384, 768 and 1024 are all common — so fi
 have constrained ADR-0022 instead of following it. ADR-0022 has since settled on
 `gte-modernbert-base`, which makes N 768 today; that remains a derived value, and replacing the
 model moves the column with it.
+
+**The interface distinguishes queries from documents.** Found while implementing the ceiling
+provider: Voyage's `input_type` is not a hint but a prompt prepended to the text — "Represent the
+query for retrieving supporting documents: " versus "Represent the document for retrieval: ". So
+`EmbeddingProvider.embed` takes a `purpose`, mapped to `input_type` by the Voyage provider and
+ignored by the local one, whose `prompts` map is empty and which takes raw text on both sides.
+
+Without that distinction the ceiling comparison would be rigged in a particular direction: a run
+that embedded queries as documents would understate the hosted model and flatter the local one,
+which is precisely backwards for a measurement meant to establish an upper bound.
 
 **Consequences.** Two of these fail *silently* — no exception, no error, just quietly wrong
 results. They are why this ADR is long:

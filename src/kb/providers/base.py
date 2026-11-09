@@ -8,7 +8,22 @@ rather than a rewrite.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Literal, Protocol
+
+EmbeddingPurpose = Literal["document", "query"]
+"""Whether text is being indexed or used to search.
+
+Not cosmetic, and not symmetric across providers. Voyage prepends a different
+instruction for each ("Represent the query for retrieving supporting
+documents: " versus "Represent the document for retrieval: "), so embedding a
+query as a document measurably degrades retrieval. Models without that
+convention ignore it -- gte-modernbert-base has an empty `prompts` map and
+takes raw text on both sides.
+
+The distinction exists on the interface so the ceiling comparison (ADR-0006)
+is fair. A ceiling run that embedded queries as documents would understate the
+hosted model and flatter the local one, which is the opposite of the point.
+"""
 
 
 class EmbeddingProvider(Protocol):
@@ -25,4 +40,9 @@ class EmbeddingProvider(Protocol):
     @property
     def dimension(self) -> int: ...
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
+    def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        purpose: EmbeddingPurpose = "document",
+    ) -> list[list[float]]: ...

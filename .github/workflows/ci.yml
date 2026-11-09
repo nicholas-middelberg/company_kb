@@ -90,6 +90,8 @@ jobs:
           # `uv sync --locked` compares like with like. Bumping uv is a paired
           # change: raise this pin and regenerate the lock together.
           version: "0.9.2"
+      # The dev group carries voyageai, so the Voyage tests run and pyright's
+      # verdict does not depend on which extras were passed.
       - run: uv sync --locked
       - name: Apply migrations
         env:
@@ -97,19 +99,24 @@ jobs:
         run: scripts/migrate.sh
       - name: Tests
         shell: bash
+        # `not model` excludes the tests that load the real 288 MB weights.
+        # Those are a local and nightly concern, not a per-PR one.
         run: |
           # pipefail, or tee would mask a pytest failure and the job would go
           # green on failing tests.
           set -o pipefail
-          uv run pytest -q | tee /tmp/pytest.log
+          uv run pytest -q -m "not model" | tee /tmp/pytest.log
       - name: Integration tests must not skip
         shell: bash
         # Skipping when no database is reachable is a local convenience, not an
         # acceptable CI outcome: the job would pass on unit tests alone while
-        # proving nothing about the pipeline.
+        # proving nothing about the pipeline. Scoped to the integration marker
+        # so an unrelated skip elsewhere cannot mask or fake this signal.
         run: |
-          if grep -qE "[0-9]+ skipped" /tmp/pytest.log; then
-            echo "::error::tests skipped - the Postgres service was unreachable"
+          set -o pipefail
+          uv run pytest -q -m integration --no-header | tee /tmp/integration.log
+          if grep -qE "[0-9]+ (skipped|no tests ran)" /tmp/integration.log; then
+            echo "::error::integration tests skipped - Postgres unreachable"
             exit 1
           fi
-          echo "no tests skipped"
+          echo "integration tests ran"

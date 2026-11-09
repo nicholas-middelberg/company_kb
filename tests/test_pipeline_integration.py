@@ -10,6 +10,7 @@ Skipped when no database is reachable, so `pytest` stays useful without
 """
 
 import hashlib
+import math
 import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -23,6 +24,7 @@ from kb.adapters.doc import DocAdapter
 from kb.config import Config
 from kb.db.connection import connect
 from kb.ingest.pipeline import IngestReport, ingest
+from kb.providers.base import EmbeddingPurpose
 
 pytestmark = pytest.mark.integration
 
@@ -33,12 +35,19 @@ DIMENSION = 768
 
 
 class FakeEmbeddingProvider:
-    """Deterministic vectors derived from the text, and a call counter."""
+    """Deterministic vectors derived from the text, and a call counter.
+
+    Mirrors the real provider's contract deliberately, including unit-norm
+    output. An earlier version returned raw bytes scaled to [0, 1], giving
+    vectors with norm ~13.9 while the real provider emits ~1.0 -- which would
+    let a test pass while depending on a property production does not have.
+    """
 
     def __init__(self, dimension: int = DIMENSION) -> None:
         self._dimension = dimension
         self.calls = 0
         self.texts_seen = 0
+        self.purposes: list[str] = []
 
     @property
     def model_name(self) -> str:
@@ -48,13 +57,21 @@ class FakeEmbeddingProvider:
     def dimension(self) -> int:
         return self._dimension
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        purpose: EmbeddingPurpose = "document",
+    ) -> list[list[float]]:
         self.calls += 1
         self.texts_seen += len(texts)
+        self.purposes.append(purpose)
         vectors: list[list[float]] = []
         for text in texts:
             seed = hashlib.sha256(text.encode()).digest()
-            vectors.append([seed[i % len(seed)] / 255.0 for i in range(self._dimension)])
+            raw = [seed[i % len(seed)] / 255.0 for i in range(self._dimension)]
+            norm = math.sqrt(sum(v * v for v in raw)) or 1.0
+            vectors.append([v / norm for v in raw])
         return vectors
 
 
@@ -263,3 +280,30 @@ def test_batching_does_not_span_documents(
     assert provider.texts_seen == 3
     # Three tiny documents would fit one batch, yet take three calls.
     assert report.embedding_calls == 3
+
+
+def test_fake_provider_matches_the_real_contract() -> None:
+    """Guards the fake itself.
+
+    If the fake drifts from the real provider's contract, every test using it
+    is testing a system that does not exist.
+    """
+    vectors = FakeEmbeddingProvider().embed(["a", "b"])
+    assert len(vectors) == 2
+    for vector in vectors:
+        assert len(vector) == DIMENSION
+        norm = math.sqrt(sum(v * v for v in vector))
+        assert math.isclose(norm, 1.0, abs_tol=1e-6)
+
+
+def test_ingestion_embeds_as_documents_not_queries(
+    conn: psycopg.Connection, dataset: str, corpus: Path
+) -> None:
+    """Indexing must use the document prompt.
+
+    On a provider that distinguishes them, embedding a corpus as queries
+    degrades retrieval for every search against it (ADR-0006).
+    """
+    provider = FakeEmbeddingProvider()
+    _run(conn, dataset, corpus, provider)
+    assert set(provider.purposes) == {"document"}

@@ -221,7 +221,9 @@ the eval harness reports cost per query.
   returns 400. Parse tool inputs as JSON; never string-match the serialized form.
 
 **`EmbeddingProvider`** — embed a batch of texts; expose `model_name` and `dimension`. Callers
-persist `model_name` onto every chunk.
+persist `model_name` onto every chunk. `embed` also takes `purpose` (`"document"` or `"query"`),
+because providers are not symmetric: Voyage prepends a different instruction per type, while the
+local model takes raw text for both. Indexing always uses `"document"`.
 
 - M1 default: **`Alibaba-NLP/gte-modernbert-base`** via sentence-transformers, loaded in-process
   — 149M parameters, 768 dimensions, 8192-token limit, Apache 2.0 (ADR-0022). The 8192 limit is
@@ -231,8 +233,10 @@ persist `model_name` onto every chunk.
   `use_safetensors=True` (the repo also ships a `.bin` pickle), never `trust_remote_code=True`,
   and `HF_HUB_OFFLINE=1` at runtime. The pin is an eval-reproducibility control as much as a
   security one — unpinned weights silently invalidate the results table.
-- M1 also ships a **Voyage** implementation, used only for the quality ceiling run below — not on
-  the serving path.
+- M1 also ships a **Voyage** implementation for the ceiling run below — not on the serving path.
+  `voyageai` is an optional extra (`uv sync --extra ceiling`), since a serving install should not
+  carry a client it never calls. The provider accepts an injected client, so its tests need
+  neither the package nor a network call.
 - Ingestion refuses to start when the provider's `dimension` disagrees with the column it is
   about to write, rather than failing at the INSERT or truncating silently.
 
@@ -246,6 +250,15 @@ a weak `recall@k` has two suspects — the local embedding model and the chunk p
 Because its dimension differs from the local model's, the ceiling run materialises vectors in a
 separate table with its own `vector(N)`, keyed to the same documents. Its scores go in the
 results table as a distinct configuration, not as a replacement row.
+
+Default `voyage-3-large` at 1024 dimensions, sent explicitly rather than relying on the model
+default so the reported dimension cannot drift from the produced one. Voyage caps a request at
+1000 texts and bills per **token**, so request count is not the cost — the provider accumulates
+`total_tokens` for the run.
+
+**Still to build:** the separate vector table (migration 002) and the comparison runner. The
+provider exists and is tested; the run itself lands with the eval harness, which is what scores
+it.
 
 ## Agent
 
@@ -399,6 +412,7 @@ Set up before the first application code — cheap on an empty repo, miserable t
 | --- | --- | --- |
 | Lint and format | `ruff` | pre-commit + CI |
 | Integration tests | `pytest -m integration` | CI, against a Postgres service |
+| Real-model tests | `pytest -m model` | Local and nightly; needs warm weights, so excluded per-PR |
 | Types | `pyright` | pre-commit + CI |
 | Secret scanning | `gitleaks` | pre-commit + CI |
 | Tests | `pytest` | CI on every PR |

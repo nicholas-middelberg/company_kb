@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from kb.config import EmbeddingConfig
+from kb.providers.base import EmbeddingPurpose
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
@@ -71,8 +72,21 @@ class LocalEmbeddingProvider:
     def dimension(self) -> int:
         return self._config.dimension
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """Embed a batch. Normalised, so cosine distance behaves."""
+    def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        purpose: EmbeddingPurpose = "document",
+    ) -> list[list[float]]:
+        """Embed a batch. Normalised, so cosine distance behaves.
+
+        `purpose` is accepted and ignored: this model's
+        config_sentence_transformers.json carries an empty `prompts` map and a
+        null default, so it takes raw text for queries and documents alike.
+        Applying a prefix anyway would shift every vector away from what the
+        model was trained to produce.
+        """
+        del purpose
         if not texts:
             return []
         # sentence-transformers' encode() carries overloads built from
