@@ -17,9 +17,18 @@ PG_USER="${KB_PG_USER:-kb}"
 PG_DATABASE="${KB_PG_DATABASE:-company_kb}"
 SERVICE="postgres"
 
+# Transport, not mechanism. ADR-0029 anticipated this: Milestone 4 needs the
+# same ledger and the same .sql files applied over a direct connection to RDS
+# rather than through docker compose. CI uses `direct` against a service
+# container, which is the same path.
 run_psql() {
-  docker compose --project-directory "$REPO_ROOT" exec -T "$SERVICE" \
-    psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$PG_DATABASE" "$@"
+  if [[ "${KB_MIGRATE_TRANSPORT:-docker}" == "direct" ]]; then
+    psql "${DATABASE_URL:?DATABASE_URL is required for the direct transport}" \
+      -v ON_ERROR_STOP=1 "$@"
+  else
+    docker compose --project-directory "$REPO_ROOT" exec -T "$SERVICE" \
+      psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$PG_DATABASE" "$@"
+  fi
 }
 
 checksum() {
@@ -32,7 +41,9 @@ checksum() {
 
 require_database() {
   if ! run_psql -c 'SELECT 1' >/dev/null 2>&1; then
-    echo "error: cannot reach Postgres. Start it with: docker compose up -d" >&2
+    echo "error: cannot reach Postgres." >&2
+    echo "       docker transport: docker compose up -d" >&2
+    echo "       direct transport: set DATABASE_URL and KB_MIGRATE_TRANSPORT=direct" >&2
     exit 1
   fi
 }

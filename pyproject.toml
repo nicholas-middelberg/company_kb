@@ -3,7 +3,23 @@ name = "company-kb"
 version = "0.1.0"
 description = "Permission-aware RAG agent over code, email, docs and transcripts"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+  # ADR-0030: driver + vector type adapter. binary bundles libpq.
+  "psycopg[binary]>=3.3",
+  "pgvector>=0.5",
+  # ADR-0031: embedding runtime. Pulls torch/transformers/tokenizers.
+  "sentence-transformers>=6.2",
+]
+
+[project.scripts]
+kb = "kb.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kb"]
 
 [dependency-groups]
 # Tooling only. Runtime dependencies arrive with the code that needs them;
@@ -18,9 +34,18 @@ dev = [
 ]
 
 [tool.uv]
-# No build yet: src/kb exists but has nothing to install. Flip to a real build
-# backend once there is a `kb` entry point to expose.
-package = false
+package = true
+
+# ADR-0031: CPU-only torch. The default PyPI Linux wheel is 539 MB because it
+# bundles the CUDA runtime, and CI has no GPU. macOS arm64 wheels are already
+# CPU/MPS-only, so this only changes Linux.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [tool.ruff]
 target-version = "py312"
@@ -46,6 +71,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "ANN"]  # assert is the point; annotations add noise
+"src/kb/cli.py" = ["T201"]     # a CLI's job is to print
 
 [tool.pyright]
 include = ["src", "tests"]
@@ -58,6 +84,7 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# src on the path because the project is not installed yet (tool.uv package).
-pythonpath = ["src"]
 addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "integration: needs a reachable Postgres (docker compose up -d)",
+]

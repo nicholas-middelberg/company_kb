@@ -60,6 +60,25 @@ jobs:
   test:
     name: pytest
     runs-on: ubuntu-latest
+    # A real Postgres, so the integration tests run here instead of skipping.
+    # Twelve silently skipped tests are worse than none: the job stays green
+    # while proving nothing about the pipeline.
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg16
+        env:
+          POSTGRES_USER: kb
+          POSTGRES_PASSWORD: kb_local_dev
+          POSTGRES_DB: company_kb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kb -d company_kb"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql://kb:kb_local_dev@localhost:5432/company_kb
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
@@ -72,4 +91,25 @@ jobs:
           # change: raise this pin and regenerate the lock together.
           version: "0.9.2"
       - run: uv sync --locked
-      - run: uv run pytest
+      - name: Apply migrations
+        env:
+          KB_MIGRATE_TRANSPORT: direct
+        run: scripts/migrate.sh
+      - name: Tests
+        shell: bash
+        run: |
+          # pipefail, or tee would mask a pytest failure and the job would go
+          # green on failing tests.
+          set -o pipefail
+          uv run pytest -q | tee /tmp/pytest.log
+      - name: Integration tests must not skip
+        shell: bash
+        # Skipping when no database is reachable is a local convenience, not an
+        # acceptable CI outcome: the job would pass on unit tests alone while
+        # proving nothing about the pipeline.
+        run: |
+          if grep -qE "[0-9]+ skipped" /tmp/pytest.log; then
+            echo "::error::tests skipped - the Postgres service was unreachable"
+            exit 1
+          fi
+          echo "no tests skipped"

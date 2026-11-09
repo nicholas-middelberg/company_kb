@@ -158,8 +158,19 @@ discover → parse → chunk → embed → upsert
 - **Incremental.** Only new or changed documents are processed.
 - **Per-document failure isolation.** One unparseable file marks that document `failed` and does
   not abort the run. The run reports counts per status.
-- **Embedding calls are batched**, and the run reports how many were made. Embedding spend is
-  real and re-embeds are full corpus passes (ADR-0006, ADR-0019).
+- **Embedding calls are batched within a document**, and the run reports how many were made.
+  Batching deliberately does not span documents: each is embedded, written and committed on its
+  own so one failure cannot discard another's work. The cost is one call per small document
+  rather than filled batches across them — negligible locally, worth knowing before pointing a
+  metered provider at a few hundred documents, as the ceiling run will.
+- **Discovery prunes excluded directories** (`config.exclude_dirs`). Not hygiene: pointing
+  `kb ingest` at a repository root walks into the virtualenv, where this project alone has 11,867
+  vendored Python files against 17 of its own.
+- **A failed document keeps its row and loses its chunks.** The row must outlive the failure or
+  `kb status` shows nothing wrong; the chunks must go or the agent cites text no longer in the
+  source through a citation that looks valid.
+- **Skip requires unchanged *and* indexed.** Matching on the hash alone would strand a document
+  that failed last run, since its hash is recorded even though it was never indexed.
 
 ## Chunking
 
@@ -387,6 +398,7 @@ Set up before the first application code — cheap on an empty repo, miserable t
 | Check | Tool | Runs |
 | --- | --- | --- |
 | Lint and format | `ruff` | pre-commit + CI |
+| Integration tests | `pytest -m integration` | CI, against a Postgres service |
 | Types | `pyright` | pre-commit + CI |
 | Secret scanning | `gitleaks` | pre-commit + CI |
 | Tests | `pytest` | CI on every PR |
@@ -415,7 +427,8 @@ The `kb` CLI. None of these exist yet.
 | --- | --- |
 | `docker compose up -d` / `down` | Start/stop Postgres. `kb db up`/`down` will wrap this |
 | `scripts/migrate.sh [--status]` | Apply pending migrations. `kb db migrate` will wrap this (ADR-0029) |
-| `kb ingest --dataset airflow-scheduler` | Run the pipeline; report per-status counts and embedding-call count |
+| `kb ingest <root> [--dataset X]` | Run the pipeline; report per-status counts and embedding-call count |
+| `kb model-warm` | One-off download of the pinned model, so ingest can stay offline |
 | `kb status` | Document counts by status; active embedding model |
 | `kb search "<query>"` | Raw hybrid retrieval, no agent — for debugging retrieval alone |
 | `kb ask "<question>"` | Full agent loop with citations |
