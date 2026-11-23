@@ -158,8 +158,19 @@ discover → parse → chunk → embed → upsert
 - **Incremental.** Only new or changed documents are processed.
 - **Per-document failure isolation.** One unparseable file marks that document `failed` and does
   not abort the run. The run reports counts per status.
-- **Embedding calls are batched**, and the run reports how many were made. Embedding spend is
-  real and re-embeds are full corpus passes (ADR-0006, ADR-0019).
+- **Embedding calls are batched within a document**, and the run reports how many were made.
+  Batching deliberately does not span documents: each is embedded, written and committed on its
+  own so one failure cannot discard another's work. The cost is one call per small document
+  rather than filled batches across them — negligible locally, worth knowing before pointing a
+  metered provider at a few hundred documents, as the ceiling run will.
+- **Discovery prunes excluded directories** (`config.exclude_dirs`). Not hygiene: pointing
+  `kb ingest` at a repository root walks into the virtualenv, where this project alone has 11,867
+  vendored Python files against 17 of its own.
+- **A failed document keeps its row and loses its chunks.** The row must outlive the failure or
+  `kb status` shows nothing wrong; the chunks must go or the agent cites text no longer in the
+  source through a citation that looks valid.
+- **Skip requires unchanged *and* indexed.** Matching on the hash alone would strand a document
+  that failed last run, since its hash is recorded even though it was never indexed.
 
 ## Chunking
 
@@ -186,9 +197,27 @@ Hybrid, per ADR-0005.
 
 1. **Keyword.** Postgres `ts_rank` over `tsv`, top 20. (Not textbook BM25; close enough for the
    baseline — named here so the difference isn't later reported as a bug.)
+   The tsquery is built by Postgres from the query text and its lexemes **OR-ed**, because
+   `plainto_tsquery` and `websearch_to_tsquery` both AND every term, which returns nothing at all
+   for a natural-language question. `quote_literal` keeps the construction injection-safe while
+   leaving identifiers like `scheduler_job.py:412` intact as single lexemes.
 2. **Vector.** pgvector cosine distance over `embedding`, top 20, **filtered to the active
    `embedding_model`** (ADR-0006).
-3. **Fuse.** Reciprocal rank fusion, `k = 60`, to a final top-k (default 10).
+3. **Fuse.** Reciprocal rank fusion, `k = 60`, to a final top-k (default 10). Computed in SQL:
+   one round trip, and the database already holds both indexes.
+
+The query is embedded with `purpose="query"`, not `"document"`.
+
+A blank query returns nothing without embedding anything. Vector search has no concept of "no
+match" — it always returns its nearest k — so whitespace would otherwise retrieve arbitrary
+chunks. A meaningful query with no good answer still returns nearest neighbours by design;
+deciding that none support an answer is abstention, which belongs to the agent.
+
+**Known limitation (ADR-0032):** the vector arm cannot reach the HNSW index, because the dataset
+and status filters live on `documents` and HNSW is an ordering index. Verified by `EXPLAIN`, and
+deliberately not fixed: the hybrid query runs in 0.65 ms at current scale, where a sequential scan
+is the right plan. Recorded because the symptom is latency that grows quietly rather than anything
+that fails.
 
 Both arms run against the same `dataset`. Each returned chunk carries its document metadata and
 locators so the agent can cite without a second query.
@@ -210,7 +239,9 @@ the eval harness reports cost per query.
   returns 400. Parse tool inputs as JSON; never string-match the serialized form.
 
 **`EmbeddingProvider`** — embed a batch of texts; expose `model_name` and `dimension`. Callers
-persist `model_name` onto every chunk.
+persist `model_name` onto every chunk. `embed` also takes `purpose` (`"document"` or `"query"`),
+because providers are not symmetric: Voyage prepends a different instruction per type, while the
+local model takes raw text for both. Indexing always uses `"document"`.
 
 - M1 default: **`Alibaba-NLP/gte-modernbert-base`** via sentence-transformers, loaded in-process
   — 149M parameters, 768 dimensions, 8192-token limit, Apache 2.0 (ADR-0022). The 8192 limit is
@@ -220,8 +251,10 @@ persist `model_name` onto every chunk.
   `use_safetensors=True` (the repo also ships a `.bin` pickle), never `trust_remote_code=True`,
   and `HF_HUB_OFFLINE=1` at runtime. The pin is an eval-reproducibility control as much as a
   security one — unpinned weights silently invalidate the results table.
-- M1 also ships a **Voyage** implementation, used only for the quality ceiling run below — not on
-  the serving path.
+- M1 also ships a **Voyage** implementation for the ceiling run below — not on the serving path.
+  `voyageai` is an optional extra (`uv sync --extra ceiling`), since a serving install should not
+  carry a client it never calls. The provider accepts an injected client, so its tests need
+  neither the package nor a network call.
 - Ingestion refuses to start when the provider's `dimension` disagrees with the column it is
   about to write, rather than failing at the INSERT or truncating silently.
 
@@ -235,6 +268,32 @@ a weak `recall@k` has two suspects — the local embedding model and the chunk p
 Because its dimension differs from the local model's, the ceiling run materialises vectors in a
 separate table with its own `vector(N)`, keyed to the same documents. Its scores go in the
 results table as a distinct configuration, not as a replacement row.
+
+Default `voyage-3-large` at 1024 dimensions, sent explicitly rather than relying on the model
+default so the reported dimension cannot drift from the produced one. Voyage caps a request at
+1000 texts and bills per **token**, so request count is not the cost — the provider accumulates
+`total_tokens` for the run.
+
+`ceiling_vectors` (migration 002) holds them, keyed to **`chunks.id`** rather than to documents
+and deliberately so: the ceiling isolates the embedding model only if chunk boundaries are
+identical on both sides, and re-chunking and re-embedding at once would measure the two together
+and attribute the result to neither. `ON DELETE CASCADE`, because a replaced chunk's ceiling
+vector describes text that no longer exists. The primary key is
+`(chunk_id, embedding_model)`, so two hosted models can be compared without a migration — both
+must emit 1024 to share the table.
+
+The runner (`kb ceiling`) has two properties that follow from billing per token:
+
+- **Resumable.** An anti-join fetches only chunks lacking a vector for this model, and each batch
+  commits, so a run that dies partway through does not re-pay for what succeeded.
+- **Estimable, and estimating is the default.** `--execute` is required to call the API at all. A
+  metered command whose default action is to spend is a bad default.
+
+Batching here spans the whole corpus, unlike ingestion. There is no per-document transaction to
+protect, so the one place batching actually pays is the one place nothing prevents it.
+
+**Still to build:** the comparison itself — scoring both vector sets on the same eval suite —
+which lands with the eval harness.
 
 ## Agent
 
@@ -387,6 +446,8 @@ Set up before the first application code — cheap on an empty repo, miserable t
 | Check | Tool | Runs |
 | --- | --- | --- |
 | Lint and format | `ruff` | pre-commit + CI |
+| Integration tests | `pytest -m integration` | CI, against a Postgres service |
+| Real-model tests | `pytest -m model` | Local and nightly; needs warm weights, so excluded per-PR |
 | Types | `pyright` | pre-commit + CI |
 | Secret scanning | `gitleaks` | pre-commit + CI |
 | Tests | `pytest` | CI on every PR |
@@ -415,9 +476,11 @@ The `kb` CLI. None of these exist yet.
 | --- | --- |
 | `docker compose up -d` / `down` | Start/stop Postgres. `kb db up`/`down` will wrap this |
 | `scripts/migrate.sh [--status]` | Apply pending migrations. `kb db migrate` will wrap this (ADR-0029) |
-| `kb ingest --dataset airflow-scheduler` | Run the pipeline; report per-status counts and embedding-call count |
+| `kb ingest <root> [--dataset X]` | Run the pipeline; report per-status counts and embedding-call count |
+| `kb model-warm` | One-off download of the pinned model, so ingest can stay offline |
+| `kb ceiling [--execute] [--limit N] [--price-per-mtok P]` | Estimate, or run, the hosted ceiling embedding. Estimates by default — a metered command must not spend on its default path |
 | `kb status` | Document counts by status; active embedding model |
-| `kb search "<query>"` | Raw hybrid retrieval, no agent — for debugging retrieval alone |
+| `kb search "<query>" [-v]` | Raw hybrid retrieval, no agent; shows per-arm ranks and the citation |
 | `kb ask "<question>"` | Full agent loop with citations |
 | `kb eval [--config <name>]` | Run the suite, write the results table |
 | `kb eval --smoke` | The 3–5 case subset CI runs on every PR |
@@ -447,8 +510,9 @@ src/kb/
   providers/     LLMProvider, EmbeddingProvider + Anthropic and Voyage implementations
   adapters/      code, email, doc, ticket — parse and chunk
   ingest/        pipeline stages, hashing, upsert
-  retrieval/     hybrid search, RRF
+  retrieval/     hybrid search, RRF, citation formatting
   agent/         loop, tools, prompts
+  ceiling/       the hosted reference run (ADR-0006)
   eval/          runner, metrics, judge, results table
   log/           interaction trace writer
   db/            queries
